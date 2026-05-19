@@ -40,6 +40,34 @@ impl Allowlist {
         Self { allow, deny }
     }
 
+    /// Merge three allowlists in cascade priority order: `local → project → user`.
+    ///
+    /// The resulting `deny` list is the concatenation of all three sources in
+    /// that order; same for `allow`.  This means patterns from `local` appear
+    /// first in the merged vector and are evaluated first.
+    ///
+    /// This works correctly with the existing `evaluate()` accumulator logic:
+    /// - A confident deny anywhere in the merged vec wins (early return on
+    ///   first `Confident` hit).
+    /// - An ambiguous deny accumulates across all three sources; the *first*
+    ///   ambiguous pattern encountered (i.e. the local one) becomes the
+    ///   annotation in `AskAnnotated` — which is the most-specific override.
+    ///
+    /// No dedup is performed.  Redundant patterns are harmless (short-circuit
+    /// on the first match) and dedup adds complexity with no practical benefit.
+    pub fn cascade(local: Self, project: Self, user: Self) -> Self {
+        Self {
+            allow: local.allow.into_iter()
+                .chain(project.allow)
+                .chain(user.allow)
+                .collect(),
+            deny: local.deny.into_iter()
+                .chain(project.deny)
+                .chain(user.deny)
+                .collect(),
+        }
+    }
+
     /// Load and parse from a file path.
     ///
     /// - File does not exist → `Ok(Allowlist::empty())` (first-time user).
@@ -197,5 +225,66 @@ mod tests {
         let path = dir.path().join("settings.json");
         std::fs::write(&path, b"not valid json").unwrap();
         assert!(Allowlist::from_path(&path).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // cascade tests
+    // -----------------------------------------------------------------------
+
+    fn allowlist_with_patterns(allow: &[&str], deny: &[&str]) -> Allowlist {
+        Allowlist {
+            allow: allow.iter().map(|s| Pattern::parse(s)).collect(),
+            deny: deny.iter().map(|s| Pattern::parse(s)).collect(),
+        }
+    }
+
+    fn raw_strs(patterns: &[Pattern]) -> Vec<&str> {
+        patterns.iter().map(|p| p.raw()).collect()
+    }
+
+    #[test]
+    fn cascade_deny_union() {
+        let local = allowlist_with_patterns(&[], &["Skill"]);
+        let project = allowlist_with_patterns(&[], &["Bash(npm test)"]);
+        let user = allowlist_with_patterns(&[], &["Read(**/.env*)"]);
+
+        let merged = Allowlist::cascade(local, project, user);
+
+        let deny_raws = raw_strs(&merged.deny);
+        assert!(deny_raws.contains(&"Skill"),            "local deny must be present");
+        assert!(deny_raws.contains(&"Bash(npm test)"),   "project deny must be present");
+        assert!(deny_raws.contains(&"Read(**/.env*)"),   "user deny must be present");
+        assert_eq!(merged.deny.len(), 3);
+    }
+
+    #[test]
+    fn cascade_allow_union() {
+        let local = allowlist_with_patterns(&["Agent(task-planner)"], &[]);
+        let project = allowlist_with_patterns(&["Bash(npm test)"],    &[]);
+        let user = allowlist_with_patterns(&["Skill"],                &[]);
+
+        let merged = Allowlist::cascade(local, project, user);
+
+        let allow_raws = raw_strs(&merged.allow);
+        assert!(allow_raws.contains(&"Agent(task-planner)"), "local allow must be present");
+        assert!(allow_raws.contains(&"Bash(npm test)"),      "project allow must be present");
+        assert!(allow_raws.contains(&"Skill"),               "user allow must be present");
+        assert_eq!(merged.allow.len(), 3);
+    }
+
+    #[test]
+    fn cascade_local_first_in_vec() {
+        // Verify ordering: local patterns come before project, project before user.
+        let local = allowlist_with_patterns(&["A"], &["X"]);
+        let project = allowlist_with_patterns(&["B"], &["Y"]);
+        let user = allowlist_with_patterns(&["C"], &["Z"]);
+
+        let merged = Allowlist::cascade(local, project, user);
+
+        let allow_raws = raw_strs(&merged.allow);
+        assert_eq!(allow_raws, vec!["A", "B", "C"], "allow order must be local→project→user");
+
+        let deny_raws = raw_strs(&merged.deny);
+        assert_eq!(deny_raws, vec!["X", "Y", "Z"], "deny order must be local→project→user");
     }
 }

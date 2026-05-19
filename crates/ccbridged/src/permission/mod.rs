@@ -27,6 +27,7 @@ use ccbridge_proto::hook::{PermissionMode, PreToolUseEvent};
 pub mod additions;
 pub mod allowlist;
 pub mod pattern;
+pub mod project;
 
 pub use allowlist::Allowlist;
 pub use pattern::{MatchResult, Pattern};
