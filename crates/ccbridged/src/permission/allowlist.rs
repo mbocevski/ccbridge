@@ -55,21 +55,21 @@ impl Allowlist {
     ///
     /// No dedup is performed.  Redundant patterns are harmless (short-circuit
     /// on the first match) and dedup adds complexity with no practical benefit.
-    /// Re-parses each pattern from its raw string to avoid the Clone constraint
-    /// on `globset::Glob` inside `ArgMatcher::PathGlob`.  Cold path; parsing is
-    /// cheap (no I/O).
     pub fn cascade(local: &Self, project: &Self, user: &Self) -> Self {
-        fn reparse(patterns: &[Pattern]) -> impl Iterator<Item = Pattern> + '_ {
-            patterns.iter().map(|p| Pattern::parse(p.raw()))
-        }
         Self {
-            allow: reparse(&local.allow)
-                .chain(reparse(&project.allow))
-                .chain(reparse(&user.allow))
+            allow: local
+                .allow
+                .iter()
+                .cloned()
+                .chain(project.allow.iter().cloned())
+                .chain(user.allow.iter().cloned())
                 .collect(),
-            deny: reparse(&local.deny)
-                .chain(reparse(&project.deny))
-                .chain(reparse(&user.deny))
+            deny: local
+                .deny
+                .iter()
+                .cloned()
+                .chain(project.deny.iter().cloned())
+                .chain(user.deny.iter().cloned())
                 .collect(),
         }
     }

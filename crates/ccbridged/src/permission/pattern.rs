@@ -703,4 +703,27 @@ mod tests {
         let e = event_for("Read", json!({"file_path": "/tmp/my_secret_key.txt"}));
         assert_eq!(p.matches(&e), MatchResult::Confident);
     }
+
+    #[test]
+    fn pattern_clone_matches_same_as_original() {
+        // Smoke-test that Clone is correct: the clone of a PathGlob pattern
+        // produces the same MatchResult as the original for both a matching
+        // and a non-matching event.
+        let original = Pattern::parse("Read(/tmp/foo)");
+        let cloned = original.clone();
+
+        let matching = event_for("Read", json!({"file_path": "/tmp/foo"}));
+        let non_matching = event_for("Read", json!({"file_path": "/tmp/bar"}));
+
+        assert_eq!(
+            original.matches(&matching),
+            cloned.matches(&matching),
+            "clone must match the same events as original (match case)"
+        );
+        assert_eq!(
+            original.matches(&non_matching),
+            cloned.matches(&non_matching),
+            "clone must match the same events as original (non-match case)"
+        );
+    }
 }
