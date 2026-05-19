@@ -34,6 +34,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use ccbridge_proto::hook::PreToolUseEvent;
+use serde::{Deserialize, Serialize};
 
 use crate::setup::{load_settings, save_settings};
 
@@ -75,7 +76,12 @@ pub struct WriteTarget {
 /// New entries are always `ProjectLocal`.  `UserGlobal` exists only for
 /// backwards compatibility with 6-column audit logs written by daemons
 /// predating the project-local rework (P3).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialises as an adjacently-tagged JSON value:
+/// - `{"project_local": {"root": "/path/to/project"}}`
+/// - `"user_global"`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AuditTarget {
     /// `<root>/.claude/settings.local.json`.
     ProjectLocal { root: std::path::PathBuf },
@@ -327,12 +333,47 @@ pub fn audit_log_path() -> anyhow::Result<std::path::PathBuf> {
         .join("allowlist-additions.log"))
 }
 
-/// Append one TSV line to the audit log.
+// ---------------------------------------------------------------------------
+// JSONL on-disk row
+// ---------------------------------------------------------------------------
+
+/// One line in the audit log (JSONL format, new writes only).
 ///
-/// Format (7 columns):
-/// `{ts}\t{op}\t{pattern}\t{tool_use_id}\t{session_short}\t{agent}\t{target}\n`
+/// Example:
+/// ```json
+/// {"ts":"2026-05-19T22:00:00Z","op":"added","pattern":"Bash(npm test)",
+///  "tool_use_id":"toolu_01abc","session_id":"3cb589","agent":"core",
+///  "target":{"project_local":{"root":"/home/user/proj"}}}
+/// ```
+#[derive(Serialize, Deserialize)]
+struct AuditLogRow {
+    ts: String,
+    op: String,
+    pattern: String,
+    tool_use_id: String,
+    session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
+    target: AuditTarget,
+}
+
+impl AuditLogRow {
+    fn into_entry(self) -> AuditEntry {
+        AuditEntry {
+            op: self.op,
+            pattern: self.pattern,
+            tool_use_id: self.tool_use_id,
+            session_id: self.session_id,
+            agent_type: self.agent,
+            target: self.target,
+        }
+    }
+}
+
+/// Append one JSONL line to the audit log.
 ///
-/// `{target}` is `project:<abs_path>` or `user`.
+/// New format: one JSON object per line, `\n`-terminated.  Free escaping —
+/// patterns containing `\t` or `\n` round-trip correctly (unlike the old TSV).
 fn append_audit_entry(
     log_path: &Path,
     op: &str,
@@ -344,17 +385,18 @@ fn append_audit_entry(
         std::fs::create_dir_all(parent)?;
     }
 
-    let ts = utc_now_iso8601();
-    let session_short = crate::util::short_session_id(&metadata.session_id);
-    let agent = metadata.agent_type.as_deref().unwrap_or("");
-    let target_col = match target {
-        AuditTarget::ProjectLocal { root } => format!("project:{}", root.display()),
-        AuditTarget::UserGlobal => "user".to_owned(),
+    let row = AuditLogRow {
+        ts: utc_now_iso8601(),
+        op: op.to_owned(),
+        pattern: pattern.to_owned(),
+        tool_use_id: metadata.tool_use_id.clone(),
+        session_id: crate::util::short_session_id(&metadata.session_id),
+        agent: metadata.agent_type.clone(),
+        target: target.clone(),
     };
-    let line = format!(
-        "{ts}\t{op}\t{pattern}\t{tool_use_id}\t{session_short}\t{agent}\t{target_col}\n",
-        tool_use_id = metadata.tool_use_id,
-    );
+
+    let mut json = serde_json::to_vec(&row).with_context(|| "serialise audit log row")?;
+    json.push(b'\n');
 
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -362,13 +404,14 @@ fn append_audit_entry(
         .open(log_path)
         .with_context(|| format!("open audit log {}", log_path.display()))?;
 
-    file.write_all(line.as_bytes())
+    file.write_all(&json)
         .with_context(|| format!("write audit log {}", log_path.display()))?;
 
     Ok(())
 }
 
 struct AuditEntry {
+    op: String,
     pattern: String,
     tool_use_id: String,
     session_id: String,
@@ -376,12 +419,20 @@ struct AuditEntry {
     target: AuditTarget,
 }
 
+impl AuditEntry {
+    fn op_str(&self) -> &str {
+        &self.op
+    }
+}
+
 /// Find the most-recent `added` line in the audit log that has no subsequent
 /// `undone` line for the same pattern + tool_use_id pair.
 ///
-/// The 7th column (target) is parsed when present; missing column or
-/// unrecognised value → `AuditTarget::UserGlobal` (backwards compat with
-/// 6-column logs from earlier daemon versions).
+/// Handles mixed files: new JSONL lines (starting with `{`) and legacy TSV
+/// lines (starting with a year digit, e.g. `2026-`) are both parsed correctly.
+///
+/// Legacy 7-col TSV: `{ts}\t{op}\t{pattern}\t{tool_use_id}\t{session}\t{agent}\t{target}`
+/// Legacy 6-col TSV: same without the target column → `AuditTarget::UserGlobal`.
 fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
     if !log_path.exists() {
         return Ok(None);
@@ -390,51 +441,44 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
         .with_context(|| format!("read {}", log_path.display()))?;
 
     // Walk lines in reverse; collect "added" entries and their subsequent undos.
-    let mut undone_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut undone_keys: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     let mut result: Option<AuditEntry> = None;
 
     for line in text.lines().rev() {
-        // splitn(7) — up to 7 columns; 7th may be absent (legacy lines).
-        let cols: Vec<&str> = line.splitn(7, '\t').collect();
-        if cols.len() < 3 {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        let op = cols[1];
-        let pattern = cols[2];
-        let tool_use_id = cols.get(3).copied().unwrap_or("");
-        let key = format!("{pattern}\x00{tool_use_id}");
 
-        match op {
+        let entry = if trimmed.starts_with('{') {
+            // JSONL line — parse via serde.
+            match serde_json::from_str::<AuditLogRow>(trimmed) {
+                Ok(row) => row.into_entry(),
+                Err(e) => {
+                    tracing::warn!("audit log: failed to parse JSONL line: {e} — skipping");
+                    continue;
+                }
+            }
+        } else {
+            // Legacy TSV line — parse manually.
+            match parse_tsv_audit_line(trimmed) {
+                Some(e) => e,
+                None => {
+                    tracing::warn!("audit log: unrecognised line format — skipping");
+                    continue;
+                }
+            }
+        };
+
+        let key = (entry.pattern.clone(), entry.tool_use_id.clone());
+
+        match entry.op_str() {
             "undone" => {
                 undone_keys.insert(key);
             }
             "added" if !undone_keys.contains(&key) => {
-                let session_short = cols.get(4).copied().unwrap_or("");
-                let agent = cols
-                    .get(5)
-                    .copied()
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned);
-
-                // Parse target column (col 6); missing/unknown → UserGlobal.
-                let target = {
-                    let raw = cols.get(6).copied().unwrap_or("user");
-                    if let Some(path) = raw.strip_prefix("project:") {
-                        AuditTarget::ProjectLocal {
-                            root: std::path::PathBuf::from(path),
-                        }
-                    } else {
-                        AuditTarget::UserGlobal
-                    }
-                };
-
-                result = Some(AuditEntry {
-                    pattern: pattern.to_owned(),
-                    tool_use_id: tool_use_id.to_owned(),
-                    session_id: session_short.to_owned(),
-                    agent_type: agent,
-                    target,
-                });
+                result = Some(entry);
                 break;
             }
             _ => {}
@@ -442,6 +486,47 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
     }
 
     Ok(result)
+}
+
+/// Parse a legacy TSV audit line into an `AuditEntry`.
+///
+/// Returns `None` for lines with fewer than 3 tab-separated fields.
+fn parse_tsv_audit_line(line: &str) -> Option<AuditEntry> {
+    // splitn(7) — up to 7 columns; 7th may be absent (6-col legacy lines).
+    let cols: Vec<&str> = line.splitn(7, '\t').collect();
+    if cols.len() < 3 {
+        return None;
+    }
+    let op = cols[1].to_owned();
+    let pattern = cols[2].to_owned();
+    let tool_use_id = cols.get(3).copied().unwrap_or("").to_owned();
+    let session_id = cols.get(4).copied().unwrap_or("").to_owned();
+    let agent_type = cols
+        .get(5)
+        .copied()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    // Parse target column (col 6); missing/unknown → UserGlobal.
+    let target = {
+        let raw = cols.get(6).copied().unwrap_or("user");
+        if let Some(path) = raw.strip_prefix("project:") {
+            AuditTarget::ProjectLocal {
+                root: std::path::PathBuf::from(path),
+            }
+        } else {
+            AuditTarget::UserGlobal
+        }
+    };
+
+    Some(AuditEntry {
+        op,
+        pattern,
+        tool_use_id,
+        session_id,
+        agent_type,
+        target,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -813,17 +898,21 @@ mod tests {
         write_allow_pattern(&target, "Skill", &audit, meta()).unwrap();
 
         let log = std::fs::read_to_string(&audit).unwrap();
-        let expected = format!("project:{}", dir.path().display());
+        // New JSONL format: the root path appears as a JSON string value.
+        let root_str = dir.path().to_str().unwrap();
         assert!(
-            log.contains(&expected),
-            "audit log must contain project:<root>, got:\n{log}"
+            log.contains(root_str),
+            "audit log must contain project root path, got:\n{log}"
+        );
+        assert!(
+            log.contains("project_local"),
+            "audit log must contain 'project_local' key, got:\n{log}"
         );
     }
 
     #[test]
-    fn audit_entry_user_global_encodes_user_column() {
-        // Verify the 7th column encoding for the legacy UserGlobal audit target
-        // (written by undo_last_allow when replaying a legacy audit entry).
+    fn audit_entry_user_global_encodes_as_jsonl() {
+        // Verify the JSONL encoding for AuditTarget::UserGlobal.
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
         let metadata = meta();
@@ -838,11 +927,122 @@ mod tests {
         .unwrap();
 
         let log = std::fs::read_to_string(&audit).unwrap();
-        let cols: Vec<&str> = log.trim_end_matches('\n').split('\t').collect();
+        let row: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
         assert_eq!(
-            cols.get(6).copied(),
-            Some("user"),
-            "7th column must be 'user' for AuditTarget::UserGlobal"
+            row["target"],
+            serde_json::json!("user_global"),
+            "UserGlobal target must serialise as \"user_global\""
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase E: JSONL audit log tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn audit_log_jsonl_round_trip_project_local() {
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let target = WriteTarget {
+            root: dir.path().to_path_buf(),
+        };
+
+        // write_allow_pattern writes JSONL via append_audit_entry.
+        write_allow_pattern(&target, "Bash(npm test)", &audit, meta()).unwrap();
+
+        let entry = find_last_undone_addition(&audit)
+            .unwrap()
+            .expect("entry must be found");
+        assert_eq!(entry.pattern, "Bash(npm test)");
+        assert_eq!(entry.op_str(), "added");
+        assert!(
+            matches!(&entry.target, AuditTarget::ProjectLocal { root } if root == dir.path()),
+            "target must be ProjectLocal with correct root"
+        );
+    }
+
+    #[test]
+    fn audit_log_jsonl_round_trip_legacy_user_target() {
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let metadata = meta();
+
+        append_audit_entry(
+            &audit,
+            "added",
+            "Skill",
+            &metadata,
+            &AuditTarget::UserGlobal,
+        )
+        .unwrap();
+
+        let entry = find_last_undone_addition(&audit)
+            .unwrap()
+            .expect("entry must be found");
+        assert_eq!(entry.pattern, "Skill");
+        assert!(
+            matches!(entry.target, AuditTarget::UserGlobal),
+            "UserGlobal target must round-trip correctly"
+        );
+    }
+
+    #[test]
+    fn audit_log_mixed_tsv_legacy_then_jsonl_new() {
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+
+        // Write a legacy 7-col TSV line first.
+        let legacy_line = format!(
+            "2026-01-01T00:00:00Z\tadded\tBash(legacy)\ttoolu_old\tabc123\tcore\tproject:{}\n",
+            dir.path().display()
+        );
+        std::fs::write(&audit, &legacy_line).unwrap();
+
+        // Append a new JSONL line via the current writer.
+        let target = WriteTarget {
+            root: dir.path().to_path_buf(),
+        };
+        write_allow_pattern(&target, "Bash(new_cmd)", &audit, meta()).unwrap();
+
+        // find_last_undone_addition must return the newest (JSONL) entry.
+        let entry = find_last_undone_addition(&audit)
+            .unwrap()
+            .expect("entry must be found");
+        assert_eq!(
+            entry.pattern, "Bash(new_cmd)",
+            "newest entry (JSONL) must be returned"
+        );
+        assert_eq!(entry.op_str(), "added");
+
+        // Undo the newest, then the legacy one should surface.
+        undo_last_allow(&audit).unwrap();
+
+        let entry2 = find_last_undone_addition(&audit)
+            .unwrap()
+            .expect("legacy entry must surface after undo");
+        assert_eq!(entry2.pattern, "Bash(legacy)");
+    }
+
+    #[test]
+    fn audit_log_handles_bash_pattern_with_tab() {
+        // Patterns containing \t must round-trip through JSONL without corruption.
+        // This is the killer feature vs TSV — a tab in the pattern would break
+        // column alignment in the old format.
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let target = WriteTarget {
+            root: dir.path().to_path_buf(),
+        };
+
+        let pattern_with_tab = "Bash(echo \"hi\there\")";
+        write_allow_pattern(&target, pattern_with_tab, &audit, meta()).unwrap();
+
+        let entry = find_last_undone_addition(&audit)
+            .unwrap()
+            .expect("entry must be found");
+        assert_eq!(
+            entry.pattern, pattern_with_tab,
+            "pattern with tab must round-trip correctly via JSONL"
         );
     }
 
