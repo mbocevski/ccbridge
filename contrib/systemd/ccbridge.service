@@ -1,0 +1,21 @@
+[Unit]
+Description=ccbridge — Claude Code hook aggregator
+Documentation=https://github.com/mbocevski/ccbridge
+After=default.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/ccbridged
+Restart=on-failure
+RestartSec=5
+
+# Socket directory: $XDG_RUNTIME_DIR/ccbridge/ (created + cleaned up by systemd)
+RuntimeDirectory=ccbridge
+RuntimeDirectoryMode=0700
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ccbridge
+
+[Install]
+WantedBy=default.target

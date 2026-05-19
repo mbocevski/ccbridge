@@ -1,0 +1,15 @@
+post_install() {
+    echo ""
+    echo "  ccbridge installed. To wire up per-user hook registration and"
+    echo "  enable the background daemon, run once as your normal user:"
+    echo ""
+    echo "    ccbridged setup"
+    echo ""
+    echo "  This registers Claude Code hooks in ~/.claude/settings.json and"
+    echo "  enables ccbridge.service for your user session."
+    echo ""
+}
+
+post_upgrade() {
+    post_install
+}
