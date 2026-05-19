@@ -63,37 +63,36 @@ pub struct AdditionMetadata {
 /// Where an allowlist addition should be written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteTarget {
-    /// `<project_root>/.claude/settings.local.json`
-    /// Created (including the `.claude/` directory) if it doesn't exist.
+    /// `<root>/.claude/settings.local.json`.
+    /// `.claude/` is created if it doesn't exist.
     ProjectLocal { root: std::path::PathBuf },
-    /// `~/.claude/settings.json` (user-global fallback).  Only used when
-    /// `cwd` is `$HOME` itself — in every other case we make `cwd` a project
-    /// root by creating `.claude/` in it.
+    /// `~/.claude/settings.json` — user-global, never written by `Always`.
+    ///
+    /// Reserved for **audit-log backwards compatibility** only: legacy
+    /// 6-column entries (no target column) parse as `UserGlobal` so
+    /// `undo-last-allow` knows to remove the pattern from the right file.
+    /// New writes never produce this variant — `resolve_write_target`
+    /// always returns `ProjectLocal`.
     UserGlobal,
 }
 
 /// Resolve the write target from a `cwd` path.
 ///
+/// `Always` never writes to user-global `~/.claude/settings.json` — that
+/// file is the user's own config and ccbridge stays out of it.  Instead:
+///
 /// - If `find_project_root` finds a real project root (an ancestor with
-///   `.claude/` or `.git`), use it.
-/// - Otherwise, treat `cwd` itself as the project root — `write_allow_pattern`
-///   will create `<cwd>/.claude/` if absent.  This means clicking Always from
-///   a scratch directory bootstraps it as a Claude project rather than leaking
-///   the pattern into user-global config.
-/// - Edge case: `cwd == $HOME` falls back to [`WriteTarget::UserGlobal`] so
-///   we never silently overwrite the user's `~/.claude/` setup with a
-///   project-style file.
+///   `.claude/` or `.git`), write to `<root>/.claude/settings.local.json`.
+/// - Otherwise (no marker anywhere up the tree, including the `cwd == $HOME`
+///   case), treat `cwd` itself as the project root.  `write_allow_pattern`
+///   creates `<cwd>/.claude/` if absent and writes `settings.local.json`
+///   there.  When `cwd == $HOME`, this resolves to
+///   `~/.claude/settings.local.json` — alongside (not on top of) the
+///   user's own `settings.json`.
 pub fn resolve_write_target(cwd: &std::path::Path) -> WriteTarget {
-    if let Some(root) = crate::permission::project::find_project_root(cwd) {
-        return WriteTarget::ProjectLocal { root };
-    }
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    if home.as_deref() == Some(cwd) {
-        return WriteTarget::UserGlobal;
-    }
-    WriteTarget::ProjectLocal {
-        root: cwd.to_path_buf(),
-    }
+    let root = crate::permission::project::find_project_root(cwd)
+        .unwrap_or_else(|| cwd.to_path_buf());
+    WriteTarget::ProjectLocal { root }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +170,8 @@ pub fn derive_pattern(event: &PreToolUseEvent) -> DerivedPattern {
 /// - For `WriteTarget::ProjectLocal { root }`: writes to
 ///   `<root>/.claude/settings.local.json`, creating `.claude/` if absent.
 /// - For `WriteTarget::UserGlobal`: writes to `~/.claude/settings.json`.
+///   This branch is never reached from the `Always` flow (which only
+///   produces `ProjectLocal`); it stays for exhaustiveness.
 ///
 /// Idempotent: if the pattern is already present, returns `Ok(())`.
 pub fn write_allow_pattern(

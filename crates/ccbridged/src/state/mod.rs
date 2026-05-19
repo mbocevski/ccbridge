@@ -614,7 +614,7 @@ impl Aggregator {
     fn handle_allowlist_always(&mut self, tool_use_id: ToolUseId) {
         use crate::permission::additions::{
             derive_pattern, resolve_write_target, write_allow_pattern, AdditionMetadata,
-            DerivedPattern, WriteTarget,
+            DerivedPattern,
         };
 
         // Look up the stashed PreToolUseEvent for this approval.
@@ -635,12 +635,6 @@ impl Aggregator {
         match derive_pattern(&event) {
             DerivedPattern::Specific(pattern) => {
                 let target = resolve_write_target(std::path::Path::new(&event.base.cwd));
-                if matches!(target, WriteTarget::UserGlobal) {
-                    warn!(
-                        cwd = %event.base.cwd,
-                        "AllowlistAlways: cwd is $HOME; writing to user-global settings",
-                    );
-                }
                 let metadata = AdditionMetadata {
                     tool_use_id: tool_use_id.clone(),
                     session_id: event.base.session_id.clone(),
