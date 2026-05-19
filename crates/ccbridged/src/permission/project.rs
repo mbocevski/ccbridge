@@ -41,7 +41,7 @@ pub fn find_project_root(cwd: &Path) -> Option<PathBuf> {
 
 /// Same as [`find_project_root`] but takes `home` explicitly so tests don't
 /// need to mutate `$HOME`.
-fn find_project_root_with_home(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn find_project_root_with_home(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let mut p: &Path = cwd;
     loop {
         // Never treat $HOME itself as a project root — its `.claude/` is the

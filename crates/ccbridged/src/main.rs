@@ -29,14 +29,31 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("setup") => ccbridged::setup::run(),
         Some("undo-last-allow") => {
-            use ccbridged::permission::additions::{audit_log_path, undo_last_allow};
+            use ccbridged::permission::additions::{audit_log_path, undo_last_allow, UndoOutcome};
             let alp = audit_log_path().unwrap_or_else(|e| {
                 eprintln!("ccbridged: cannot locate audit log: {e:#}");
                 std::process::exit(1);
             });
-            if let Err(e) = undo_last_allow(&alp) {
-                eprintln!("ccbridged undo-last-allow: {e:#}");
-                std::process::exit(1);
+            match undo_last_allow(&alp) {
+                Ok(UndoOutcome::Removed { pattern, file }) => {
+                    println!("Removed pattern {pattern:?} from {}.", file.display());
+                }
+                Ok(UndoOutcome::AlreadyGone { pattern, file }) => {
+                    println!(
+                        "Pattern {pattern:?} not present in {} (already removed?).",
+                        file.display()
+                    );
+                }
+                Ok(UndoOutcome::FileMissing { pattern, file }) => {
+                    println!(
+                        "Pattern {pattern:?}: settings file {} not found (already removed?).",
+                        file.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("ccbridged undo-last-allow: {e:#}");
+                    std::process::exit(1);
+                }
             }
         }
         Some(other) => {
@@ -140,8 +157,11 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         std::path::PathBuf::from("/dev/null")
     });
 
+    // Resolve $HOME once here (single-threaded context) for the project root cache.
+    let home_dir = std::env::var_os("HOME").map(std::path::PathBuf::from);
+
     // Build the per-project allowlist cache and spawn the aggregator.
-    let allowlist_cache = Arc::new(ProjectAllowlistCache::new(Arc::clone(&allowlist)));
+    let allowlist_cache = Arc::new(ProjectAllowlistCache::new(Arc::clone(&allowlist), home_dir));
     let (agg_tx, hb_rx) = ccbridged::state::spawn_with_paths(
         config.approvals.timeout(),
         config.approvals.fallback,

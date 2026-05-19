@@ -34,7 +34,7 @@ use arc_swap::ArcSwap;
 use lru::LruCache;
 
 use super::allowlist::Allowlist;
-use super::project::find_project_root;
+use super::project::find_project_root_with_home;
 use super::spawn_settings_watcher;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +61,11 @@ pub struct ProjectAllowlistCache {
 
     /// Per-project entries keyed by project root path, bounded by LRU_CAPACITY.
     projects: Mutex<LruCache<PathBuf, ProjectEntry>>,
+
+    /// `$HOME` resolved once at startup — avoids a per-call `std::env::var_os`.
+    /// Passed to `find_project_root_with_home` to skip `$HOME/.claude/` as a
+    /// project root marker.
+    home: Option<PathBuf>,
 }
 
 struct ProjectEntry {
@@ -80,15 +85,20 @@ struct ProjectEntry {
 impl ProjectAllowlistCache {
     /// Construct the cache with a shared user-global allowlist handle.
     ///
+    /// `home` is the user's home directory resolved once at startup — passed to
+    /// `find_project_root_with_home` to skip `$HOME/.claude/` as a project root.
+    /// Pass `None` to fall back to per-call `std::env::var_os("HOME")` (old behaviour).
+    ///
     /// The caller must also pass `user` to [`spawn_settings_watcher`] so the
     /// user-file watcher can swap it on change — this cache holds a clone of
     /// the same handle.
-    pub fn new(user: Arc<ArcSwap<Allowlist>>) -> Self {
+    pub fn new(user: Arc<ArcSwap<Allowlist>>, home: Option<PathBuf>) -> Self {
         Self {
             user,
             projects: Mutex::new(LruCache::new(
                 NonZeroUsize::new(LRU_CAPACITY).expect("LRU_CAPACITY > 0"),
             )),
+            home,
         }
     }
 
@@ -100,6 +110,7 @@ impl ProjectAllowlistCache {
             projects: Mutex::new(LruCache::new(
                 NonZeroUsize::new(capacity).expect("capacity > 0"),
             )),
+            home: std::env::var_os("HOME").map(PathBuf::from),
         }
     }
 
@@ -122,13 +133,10 @@ impl ProjectAllowlistCache {
     ///
     /// Must be called from within a tokio runtime.  See module-level doc.
     pub fn cascade_for(&self, cwd: &Path) -> Allowlist {
-        let root = match find_project_root(cwd) {
+        let root = match find_project_root_with_home(cwd, self.home.as_deref()) {
             None => {
-                return Allowlist::cascade(
-                    &Allowlist::empty(),
-                    &Allowlist::empty(),
-                    self.user.load().as_ref(),
-                );
+                // No project root — return user allowlist directly (item 5).
+                return (*self.user.load_full()).clone();
             }
             Some(r) => r,
         };
@@ -258,7 +266,7 @@ mod tests {
     #[test]
     fn cascade_for_unknown_cwd_returns_user_only() {
         let user = user_with_allow(&["Skill"]);
-        let cache = ProjectAllowlistCache::new(user);
+        let cache = ProjectAllowlistCache::new(user, None);
 
         // A path that provably has no .claude/.git ancestors.
         let cascade = cache.cascade_for(Path::new("/nonexistent-ccbridge-test-xyz/sub"));
@@ -286,7 +294,7 @@ mod tests {
         );
 
         let user = user_with_allow(&["Skill"]);
-        let cache = ProjectAllowlistCache::new(user);
+        let cache = ProjectAllowlistCache::new(user, None);
 
         let cascade = cache.cascade_for(dir.path());
 
@@ -313,7 +321,7 @@ mod tests {
         write_settings(&claude_dir, "settings.local.json", &["Bash(echo hi)"], &[]);
 
         let user = user_with_allow(&["Skill"]);
-        let cache = ProjectAllowlistCache::new(user);
+        let cache = ProjectAllowlistCache::new(user, None);
 
         let cascade = cache.cascade_for(dir.path());
 
@@ -330,7 +338,7 @@ mod tests {
         let dir = make_project();
 
         let user = user_with_allow(&["Skill"]);
-        let cache = ProjectAllowlistCache::new(user);
+        let cache = ProjectAllowlistCache::new(user, None);
 
         let cascade = cache.cascade_for(dir.path());
 
@@ -344,7 +352,7 @@ mod tests {
         let dir = make_project();
 
         let user = user_with_allow(&[]);
-        let cache = ProjectAllowlistCache::new(user);
+        let cache = ProjectAllowlistCache::new(user, None);
 
         cache.cascade_for(dir.path());
         cache.cascade_for(dir.path());
@@ -367,7 +375,7 @@ mod tests {
         write_settings(&claude_dir, "settings.local.json", &[], &["Bash(npm test)"]);
 
         let user = user_with_allow(&["Skill"]); // user has no Bash deny
-        let cache = ProjectAllowlistCache::new(user);
+        let cache = ProjectAllowlistCache::new(user, None);
 
         let event = PreToolUseEvent {
             base: HookBase {

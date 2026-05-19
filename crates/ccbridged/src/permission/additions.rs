@@ -126,42 +126,22 @@ pub fn derive_pattern(event: &PreToolUseEvent) -> DerivedPattern {
     }
 
     match tool {
-        "Bash" => {
-            // Derive a literal command match.  Defensive: only accept a JSON
-            // string — don't coerce numbers or booleans to strings.
-            if let Some(cmd) = event.tool_input.get("command").and_then(|v| v.as_str()) {
-                DerivedPattern::Specific(format!("Bash({cmd})"))
-            } else {
-                DerivedPattern::BareToolNeedsConfirmation {
-                    tool: tool.to_owned(),
-                }
-            }
-        }
+        // Derive a literal command match.  Defensive: only accept a JSON
+        // string — don't coerce numbers or booleans to strings.
+        "Bash" => specific_or_bare(tool, event.tool_input.get("command"), |v| {
+            format!("Bash({v})")
+        }),
 
+        // Path-based tools — derive an exact-path pattern.
         "Read" | "Edit" | "Write" | "MultiEdit" => {
-            // Path-based tools — derive an exact-path pattern.
-            if let Some(path) = event.tool_input.get("file_path").and_then(|v| v.as_str()) {
-                DerivedPattern::Specific(format!("{tool}({path})"))
-            } else {
-                DerivedPattern::BareToolNeedsConfirmation {
-                    tool: tool.to_owned(),
-                }
-            }
+            specific_or_bare(tool, event.tool_input.get("file_path"), |v| {
+                format!("{tool}({v})")
+            })
         }
 
-        "Agent" => {
-            if let Some(t) = event
-                .tool_input
-                .get("subagent_type")
-                .and_then(|v| v.as_str())
-            {
-                DerivedPattern::Specific(format!("Agent({t})"))
-            } else {
-                DerivedPattern::BareToolNeedsConfirmation {
-                    tool: tool.to_owned(),
-                }
-            }
-        }
+        "Agent" => specific_or_bare(tool, event.tool_input.get("subagent_type"), |v| {
+            format!("Agent({v})")
+        }),
 
         // Glob and Grep use input fields ("pattern", "path") that our matcher
         // doesn't currently map to Confident matches.  Deriving a pattern that
@@ -169,6 +149,24 @@ pub fn derive_pattern(event: &PreToolUseEvent) -> DerivedPattern {
         // round-trip invariant, so we fall to BareToolNeedsConfirmation.
         // This is a known limitation; improve the matcher in a follow-up task.
         _ => DerivedPattern::BareToolNeedsConfirmation {
+            tool: tool.to_owned(),
+        },
+    }
+}
+
+/// Extract a string value from a JSON field and format it into a specific
+/// pattern, or fall back to `BareToolNeedsConfirmation`.
+///
+/// `field_value` is `Option<&serde_json::Value>` from `tool_input.get(key)`.
+/// `fmt` converts the string value to the final pattern string.
+fn specific_or_bare(
+    tool: &str,
+    field_value: Option<&serde_json::Value>,
+    fmt: impl FnOnce(&str) -> String,
+) -> DerivedPattern {
+    match field_value.and_then(|v| v.as_str()) {
+        Some(s) => DerivedPattern::Specific(fmt(s)),
+        None => DerivedPattern::BareToolNeedsConfirmation {
             tool: tool.to_owned(),
         },
     }
@@ -246,14 +244,37 @@ pub fn write_allow_pattern(
 // undo-last-allow
 // ---------------------------------------------------------------------------
 
+/// Outcome of [`undo_last_allow`].
+///
+/// The caller is responsible for printing / logging as appropriate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UndoOutcome {
+    /// Pattern was found and removed.
+    Removed {
+        pattern: String,
+        file: std::path::PathBuf,
+    },
+    /// Pattern was not in the target file (manually removed before undo).
+    AlreadyGone {
+        pattern: String,
+        file: std::path::PathBuf,
+    },
+    /// The target settings file itself is absent.
+    FileMissing {
+        pattern: String,
+        file: std::path::PathBuf,
+    },
+}
+
 /// Remove the most-recent un-undone allowlist addition and mark it as undone.
 ///
 /// The target file (project-local or user-global) is read from the audit log,
 /// so the caller doesn't need to pass a settings path.
 ///
-/// - Pattern not in the target file (manually removed): prints a notice, returns `Ok(())`.
-/// - Audit log empty / no `added` entries: returns an `Err`.
-pub fn undo_last_allow(audit_log_path: &Path) -> Result<()> {
+/// Returns [`UndoOutcome`] describing what happened; the caller is responsible
+/// for printing user-facing messages.  Returns `Err` only on I/O failure or
+/// when the audit log contains no `added` entries to undo.
+pub fn undo_last_allow(audit_log_path: &Path) -> Result<UndoOutcome> {
     let entry = find_last_undone_addition(audit_log_path)
         .context("reading audit log")?
         .ok_or_else(|| {
@@ -269,44 +290,46 @@ pub fn undo_last_allow(audit_log_path: &Path) -> Result<()> {
         AuditTarget::UserGlobal => crate::permission::settings_path(),
     };
 
-    let mut settings = load_settings(&settings_path)
-        .with_context(|| format!("read {}", settings_path.display()))?;
-
-    let allow_arr = settings
-        .get_mut("permissions")
-        .and_then(|p| p.get_mut("allow"))
-        .and_then(|a| a.as_array_mut());
-
-    match allow_arr {
-        None => {
-            println!(
-                "Pattern {:?} not present in {} (already removed?).",
-                entry.pattern,
-                settings_path.display(),
-            );
+    let outcome = if !settings_path.exists() {
+        UndoOutcome::FileMissing {
+            pattern: entry.pattern.clone(),
+            file: settings_path.clone(),
         }
-        Some(arr) => {
-            let before = arr.len();
-            arr.retain(|v| v.as_str() != Some(&entry.pattern));
-            if arr.len() == before {
-                println!(
-                    "Pattern {:?} not present in {} (already removed?).",
-                    entry.pattern,
-                    settings_path.display(),
-                );
-            } else {
-                save_settings(&settings_path, &settings)
-                    .with_context(|| format!("write {}", settings_path.display()))?;
-                println!(
-                    "Removed pattern {:?} from {}.",
-                    entry.pattern,
-                    settings_path.display(),
-                );
+    } else {
+        let mut settings = load_settings(&settings_path)
+            .with_context(|| format!("read {}", settings_path.display()))?;
+
+        let allow_arr = settings
+            .get_mut("permissions")
+            .and_then(|p| p.get_mut("allow"))
+            .and_then(|a| a.as_array_mut());
+
+        match allow_arr {
+            None => UndoOutcome::AlreadyGone {
+                pattern: entry.pattern.clone(),
+                file: settings_path.clone(),
+            },
+            Some(arr) => {
+                let before = arr.len();
+                arr.retain(|v| v.as_str() != Some(&entry.pattern));
+                if arr.len() == before {
+                    UndoOutcome::AlreadyGone {
+                        pattern: entry.pattern.clone(),
+                        file: settings_path.clone(),
+                    }
+                } else {
+                    save_settings(&settings_path, &settings)
+                        .with_context(|| format!("write {}", settings_path.display()))?;
+                    UndoOutcome::Removed {
+                        pattern: entry.pattern.clone(),
+                        file: settings_path.clone(),
+                    }
+                }
             }
         }
-    }
+    };
 
-    // Record the undo in the audit log regardless.
+    // Record the undo in the audit log regardless of outcome.
     append_audit_entry(
         audit_log_path,
         "undone",
@@ -319,7 +342,7 @@ pub fn undo_last_allow(audit_log_path: &Path) -> Result<()> {
         &entry.target,
     )?;
 
-    Ok(())
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -859,7 +882,11 @@ mod tests {
         let local_settings = dir.path().join(".claude").join("settings.local.json");
         std::fs::write(&local_settings, r#"{"permissions":{"allow":[]}}"#).unwrap();
 
-        undo_last_allow(&audit).unwrap(); // must not panic
+        let outcome = undo_last_allow(&audit).unwrap();
+        assert!(
+            matches!(outcome, UndoOutcome::AlreadyGone { .. }),
+            "must return AlreadyGone when pattern not in file"
+        );
     }
 
     // -----------------------------------------------------------------------

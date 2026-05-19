@@ -461,18 +461,15 @@ impl Aggregator {
                         let _ =
                             respond.send(HookOutcome::Immediate(HookResponse::HardDeny { reason }));
                     }
-                    Decision::AskAnnotated {
-                        matched_pattern,
-                        source,
-                    } => {
+                    Decision::AskAnnotated(ann) => {
                         debug!(
                             session_id = %e.base.session_id,
                             tool = %e.tool_name,
-                            pattern = %matched_pattern,
-                            ?source,
+                            pattern = %ann.matched_pattern,
+                            source = ?ann.source,
                             "PreToolUse ambiguous match — intercepting with annotation",
                         );
-                        self.start_intercept(e, respond, Some((matched_pattern, source)));
+                        self.start_intercept(e, respond, Some(ann));
                     }
                     Decision::Intercept => {
                         self.start_intercept(e, respond, None);
@@ -544,13 +541,13 @@ impl Aggregator {
     /// in `pending`, marks the session as `waiting`, and returns
     /// [`HookOutcome::Await`] to the ingest handler, which drives the timeout loop.
     ///
-    /// `annotation` is `Some((pattern, source))` when the decision came from
+    /// `annotation` is `Some(PatternAnnotation)` when the decision came from
     /// [`crate::permission::Decision::AskAnnotated`].  Pass `None` for plain intercept.
     fn start_intercept(
         &mut self,
         e: ccbridge_proto::hook::PreToolUseEvent,
         respond: oneshot::Sender<HookOutcome>,
-        annotation: Option<(String, AllowOrDeny)>,
+        annotation: Option<crate::permission::PatternAnnotation>,
     ) {
         let hint = format_tool_hint(&e.tool_input);
         debug!(
@@ -564,7 +561,7 @@ impl Aggregator {
         let (decision_tx, decision_rx) = oneshot::channel::<WireDecision>();
 
         let (matched_pattern, match_source) = match annotation {
-            Some((p, s)) => (Some(p), Some(s)),
+            Some(ann) => (Some(ann.matched_pattern), Some(ann.source)),
             None => (None, None),
         };
 
@@ -768,7 +765,7 @@ pub fn spawn(
     fallback: Fallback,
     user_allowlist: Arc<ArcSwap<Allowlist>>,
 ) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
-    let cache = Arc::new(ProjectAllowlistCache::new(user_allowlist));
+    let cache = Arc::new(ProjectAllowlistCache::new(user_allowlist, None));
     spawn_with_paths(
         approval_timeout,
         fallback,
@@ -880,7 +877,7 @@ mod tests {
         let user = Arc::new(ArcSwap::new(
             Arc::new(crate::permission::Allowlist::empty()),
         ));
-        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user));
+        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user, None));
         let (agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
@@ -960,9 +957,10 @@ mod tests {
             allow: vec![crate::permission::Pattern::parse("Bash(git status:*)")],
             deny: vec![],
         };
-        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(Arc::new(
-            ArcSwap::new(Arc::new(al)),
-        )));
+        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(
+            Arc::new(ArcSwap::new(Arc::new(al))),
+            None,
+        ));
         let (mut agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
@@ -1081,7 +1079,7 @@ mod tests {
         let user = Arc::new(ArcSwap::new(
             Arc::new(crate::permission::Allowlist::empty()),
         ));
-        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user));
+        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user, None));
         let (agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),

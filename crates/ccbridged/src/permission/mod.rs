@@ -55,10 +55,7 @@ pub enum Decision {
     /// The notification body should name the matched pattern so the user
     /// understands why ccbridge is intercepting a call they may have
     /// intended to allow/deny.
-    AskAnnotated {
-        matched_pattern: String,
-        source: AllowOrDeny,
-    },
+    AskAnnotated(PatternAnnotation),
 
     /// No confident decision.  Use the normal hold-for-approval flow.
     Intercept,
@@ -69,6 +66,15 @@ pub enum Decision {
 pub enum AllowOrDeny {
     Allow,
     Deny,
+}
+
+/// The pattern and its list side that produced an [`Decision::AskAnnotated`].
+#[derive(Debug, Clone)]
+pub struct PatternAnnotation {
+    /// Raw pattern string from `permissions.allow` / `permissions.deny`.
+    pub matched_pattern: String,
+    /// Which side of the allowlist the pattern came from.
+    pub source: AllowOrDeny,
 }
 
 // ---------------------------------------------------------------------------
@@ -246,10 +252,10 @@ pub fn evaluate(event: &PreToolUseEvent, allowlist: &Allowlist) -> Decision {
         }
     }
     if let Some(matched) = ambiguous_deny {
-        return Decision::AskAnnotated {
+        return Decision::AskAnnotated(PatternAnnotation {
             matched_pattern: matched,
             source: AllowOrDeny::Deny,
-        };
+        });
     }
 
     // Step 3: allow patterns (only confident matches short-circuit).
@@ -270,10 +276,10 @@ pub fn evaluate(event: &PreToolUseEvent, allowlist: &Allowlist) -> Decision {
 
     // Step 4: ambiguous allow with no confident match.
     if let Some(matched) = ambiguous_allow {
-        return Decision::AskAnnotated {
+        return Decision::AskAnnotated(PatternAnnotation {
             matched_pattern: matched,
             source: AllowOrDeny::Allow,
-        };
+        });
     }
 
     // Step 5: nothing matched.
@@ -414,10 +420,10 @@ mod tests {
         assert!(
             matches!(
                 evaluate(&e, &al),
-                Decision::AskAnnotated {
+                Decision::AskAnnotated(PatternAnnotation {
                     source: AllowOrDeny::Deny,
                     ..
-                }
+                })
             ),
             "ambiguous deny must return AskAnnotated with source=Deny"
         );
@@ -465,10 +471,10 @@ mod tests {
         assert!(
             matches!(
                 evaluate(&e, &al),
-                Decision::AskAnnotated {
+                Decision::AskAnnotated(PatternAnnotation {
                     source: AllowOrDeny::Allow,
                     ..
-                }
+                })
             ),
             "ambiguous allow must return AskAnnotated with source=Allow"
         );
@@ -508,10 +514,10 @@ mod tests {
         // Bash event with NO command field → Ambiguous.
         let e = pre_tool_use("Bash", PermissionMode::Default, json!({}));
         match evaluate(&e, &al) {
-            Decision::AskAnnotated {
+            Decision::AskAnnotated(PatternAnnotation {
                 ref matched_pattern,
                 source,
-            } => {
+            }) => {
                 assert_eq!(
                     matched_pattern, "Bash(git status:*)",
                     "matched_pattern must be the raw settings.json string"
