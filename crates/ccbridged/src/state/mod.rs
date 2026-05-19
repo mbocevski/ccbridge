@@ -291,10 +291,6 @@ pub struct Aggregator {
     /// of each distinct project root (from `event.base.cwd`).
     allowlist_cache: Arc<ProjectAllowlistCache>,
 
-    /// Path to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`).
-    /// Used by `AllowlistAlways` to atomically write a new allow pattern.
-    settings_path: std::path::PathBuf,
-
     /// Path to the allowlist audit log.
     /// Used by `AllowlistAlways` to append an audit entry.
     audit_log_path: std::path::PathBuf,
@@ -320,7 +316,6 @@ impl Aggregator {
         approval_timeout: Duration,
         fallback: Fallback,
         allowlist_cache: Arc<ProjectAllowlistCache>,
-        settings_path: std::path::PathBuf,
         audit_log_path: std::path::PathBuf,
     ) -> (Self, broadcast::Receiver<Heartbeat>) {
         let (hb_tx, hb_rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -333,7 +328,6 @@ impl Aggregator {
             approval_timeout,
             fallback,
             allowlist_cache,
-            settings_path,
             audit_log_path,
         };
         (agg, hb_rx)
@@ -352,17 +346,21 @@ impl Aggregator {
         let waiting = self.sessions.values().filter(|s| s.waiting).count() as u32;
 
         // Build `prompt` from the first waiting session (at most one in practice).
-        let prompt = self.sessions.values().find(|s| s.waiting).map(|s| PromptInfo {
-            id: s.pending_tool_use_id.clone().unwrap_or_default(),
-            tool: s.pending_tool_name.clone().unwrap_or_default(),
-            hint: s.pending_tool_hint.clone().unwrap_or_default(),
-            matched_pattern: s.pending_matched_pattern.clone(),
-            matched_source: s.pending_match_source.map(MatchSource::from),
-            // Session/agent context — always populated when a prompt is waiting.
-            session_id: Some(s.id.clone()),
-            cwd: Some(s.cwd.clone()),
-            agent_type: s.pending_agent_type.clone(),
-        });
+        let prompt = self
+            .sessions
+            .values()
+            .find(|s| s.waiting)
+            .map(|s| PromptInfo {
+                id: s.pending_tool_use_id.clone().unwrap_or_default(),
+                tool: s.pending_tool_name.clone().unwrap_or_default(),
+                hint: s.pending_tool_hint.clone().unwrap_or_default(),
+                matched_pattern: s.pending_matched_pattern.clone(),
+                matched_source: s.pending_match_source.map(MatchSource::from),
+                // Session/agent context — always populated when a prompt is waiting.
+                session_id: Some(s.id.clone()),
+                cwd: Some(s.cwd.clone()),
+                agent_type: s.pending_agent_type.clone(),
+            });
 
         let msg = if waiting > 0 {
             // Include tool name if we have it.
@@ -412,11 +410,7 @@ impl Aggregator {
     // Event handlers (called from the run loop)
     // -----------------------------------------------------------------------
 
-    fn handle_hook_event(
-        &mut self,
-        event: HookEvent,
-        respond: oneshot::Sender<HookResponse>,
-    ) {
+    fn handle_hook_event(&mut self, event: HookEvent, respond: oneshot::Sender<HookResponse>) {
         match event {
             HookEvent::SessionStart(e) => {
                 info!(session_id = %e.base.session_id, cwd = %e.base.cwd, "session started");
@@ -440,9 +434,9 @@ impl Aggregator {
                 use crate::permission::{self, Decision};
 
                 // Cascade project-local + project + user allowlists for this cwd.
-                let cascade = self.allowlist_cache.cascade_for(
-                    std::path::Path::new(&e.base.cwd),
-                );
+                let cascade = self
+                    .allowlist_cache
+                    .cascade_for(std::path::Path::new(&e.base.cwd));
                 match permission::evaluate(&e, &cascade) {
                     Decision::Allow { reason } => {
                         debug!(
@@ -462,7 +456,10 @@ impl Aggregator {
                         );
                         let _ = respond.send(HookResponse::HardDeny { reason });
                     }
-                    Decision::AskAnnotated { matched_pattern, source } => {
+                    Decision::AskAnnotated {
+                        matched_pattern,
+                        source,
+                    } => {
                         debug!(
                             session_id = %e.base.session_id,
                             tool = %e.tool_name,
@@ -563,7 +560,8 @@ impl Aggregator {
         );
 
         let (decision_tx, decision_rx) = oneshot::channel::<WireDecision>();
-        self.pending_approvals.insert(e.tool_use_id.clone(), decision_tx);
+        self.pending_approvals
+            .insert(e.tool_use_id.clone(), decision_tx);
 
         let session = self
             .sessions
@@ -615,8 +613,8 @@ impl Aggregator {
 
     fn handle_allowlist_always(&mut self, tool_use_id: ToolUseId) {
         use crate::permission::additions::{
-            derive_pattern, resolve_write_target, write_allow_pattern,
-            AdditionMetadata, DerivedPattern, WriteTarget,
+            derive_pattern, resolve_write_target, write_allow_pattern, AdditionMetadata,
+            DerivedPattern, WriteTarget,
         };
 
         // Look up the stashed PreToolUseEvent for this approval.
@@ -636,9 +634,7 @@ impl Aggregator {
 
         match derive_pattern(&event) {
             DerivedPattern::Specific(pattern) => {
-                let target = resolve_write_target(
-                    std::path::Path::new(&event.base.cwd),
-                );
+                let target = resolve_write_target(std::path::Path::new(&event.base.cwd));
                 if matches!(target, WriteTarget::UserGlobal) {
                     warn!(
                         cwd = %event.base.cwd,
@@ -651,12 +647,7 @@ impl Aggregator {
                     session_id: event.base.session_id.clone(),
                     agent_type: event.agent_type.clone(),
                 };
-                match write_allow_pattern(
-                    &target,
-                    &pattern,
-                    &self.audit_log_path,
-                    metadata,
-                ) {
+                match write_allow_pattern(&target, &pattern, &self.audit_log_path, metadata) {
                     Ok(()) => info!(%pattern, ?target, "AllowlistAlways: wrote allow pattern"),
                     Err(e) => warn!("AllowlistAlways: failed to write pattern: {e:#}"),
                 }
@@ -755,21 +746,14 @@ impl Aggregator {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Spawn the Aggregator with explicit paths (production).
+/// Spawn the Aggregator with an explicit audit log path (production).
 pub fn spawn_with_paths(
     approval_timeout: Duration,
     fallback: Fallback,
     allowlist_cache: Arc<ProjectAllowlistCache>,
-    settings_path: std::path::PathBuf,
     audit_log_path: std::path::PathBuf,
 ) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
-    let (agg, hb_rx) = Aggregator::new(
-        approval_timeout,
-        fallback,
-        allowlist_cache,
-        settings_path,
-        audit_log_path,
-    );
+    let (agg, hb_rx) = Aggregator::new(approval_timeout, fallback, allowlist_cache, audit_log_path);
     let (tx, rx) = mpsc::channel(256);
     tokio::spawn(agg.run(rx));
     (tx, hb_rx)
@@ -777,8 +761,8 @@ pub fn spawn_with_paths(
 
 /// Spawn the Aggregator with a bare user allowlist (test shim).
 ///
-/// Wraps the user allowlist in a `ProjectAllowlistCache` with no-op
-/// settings/audit paths.  Integration tests that don't exercise `AllowlistAlways`
+/// Wraps the user allowlist in a `ProjectAllowlistCache` with a no-op
+/// audit log path.  Integration tests that don't exercise `AllowlistAlways`
 /// or project-local evaluation can pass a plain `Arc<ArcSwap<Allowlist>>` here.
 pub fn spawn(
     approval_timeout: Duration,
@@ -790,7 +774,6 @@ pub fn spawn(
         approval_timeout,
         fallback,
         cache,
-        std::path::PathBuf::from("/dev/null"),
         std::path::PathBuf::from("/dev/null"),
     )
 }
@@ -818,8 +801,8 @@ pub(crate) fn format_tool_hint(input: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use ccbridge_proto::hook::{
-        HookBase, PostToolUseEvent, PreToolUseEvent, SessionStartEvent, SessionSource,
-        StopEvent, UserPromptSubmitEvent, PermissionMode,
+        HookBase, PermissionMode, PostToolUseEvent, PreToolUseEvent, SessionSource,
+        SessionStartEvent, StopEvent, UserPromptSubmitEvent,
     };
     use serde_json::json;
     use tokio::sync::oneshot;
@@ -895,13 +878,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn new_agg() -> Aggregator {
-        let user = Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty())));
+        let user = Arc::new(ArcSwap::new(
+            Arc::new(crate::permission::Allowlist::empty()),
+        ));
         let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user));
         let (agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
             cache,
-            std::path::PathBuf::from("/dev/null"),
             std::path::PathBuf::from("/dev/null"),
         );
         agg
@@ -952,10 +936,7 @@ mod tests {
 
         // Fire PreToolUse.
         let (respond_tx, mut respond_rx) = oneshot::channel();
-        agg.handle_hook_event(
-            pre_tool_use_event("sess", "toolu_abc", "Bash"),
-            respond_tx,
-        );
+        agg.handle_hook_event(pre_tool_use_event("sess", "toolu_abc", "Bash"), respond_tx);
 
         // Aggregator should have stored the approval.
         assert!(agg.pending_approvals.contains_key("toolu_abc"));
@@ -981,14 +962,13 @@ mod tests {
             allow: vec![crate::permission::Pattern::parse("Bash(git status:*)")],
             deny: vec![],
         };
-        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(
-            Arc::new(ArcSwap::new(Arc::new(al))),
-        ));
+        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(Arc::new(
+            ArcSwap::new(Arc::new(al)),
+        )));
         let (mut agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
             cache,
-            std::path::PathBuf::from("/dev/null"),
             std::path::PathBuf::from("/dev/null"),
         );
 
@@ -1016,7 +996,9 @@ mod tests {
         // Snapshot must carry the annotation fields.
         let hb = agg.snapshot();
         assert_eq!(hb.waiting, 1);
-        let prompt = hb.prompt.expect("prompt must be present for waiting session");
+        let prompt = hb
+            .prompt
+            .expect("prompt must be present for waiting session");
         assert_eq!(
             prompt.matched_pattern.as_deref(),
             Some("Bash(git status:*)"),
@@ -1097,27 +1079,22 @@ mod tests {
             Some("general-purpose"),
             "agent_type must be captured from the PreToolUse event"
         );
-        assert_eq!(
-            prompt.session_id.as_deref(),
-            Some("sess-agent"),
-        );
+        assert_eq!(prompt.session_id.as_deref(), Some("sess-agent"),);
     }
 
     // -----------------------------------------------------------------------
     // AllowlistAlways tests (use spawn_with_paths for real tempdir paths)
     // -----------------------------------------------------------------------
 
-    fn new_agg_with_paths(
-        settings: &std::path::Path,
-        audit: &std::path::Path,
-    ) -> Aggregator {
-        let user = Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty())));
+    fn new_agg_with_paths(audit: &std::path::Path) -> Aggregator {
+        let user = Arc::new(ArcSwap::new(
+            Arc::new(crate::permission::Allowlist::empty()),
+        ));
         let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user));
         let (agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
             cache,
-            settings.to_path_buf(),
             audit.to_path_buf(),
         );
         agg
@@ -1131,10 +1108,7 @@ mod tests {
         std::fs::create_dir(dir.path().join(".claude")).unwrap();
         let audit = dir.path().join("audit.log");
 
-        let mut agg = new_agg_with_paths(
-            std::path::Path::new("/dev/null"),  // settings_path unused for Always now
-            &audit,
-        );
+        let mut agg = new_agg_with_paths(&audit);
 
         let (tx0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess_always"), tx0);
@@ -1164,7 +1138,9 @@ mod tests {
 
         agg.handle_allowlist_always("toolu_always_01".to_owned());
 
-        let decision = decision_rx.try_recv().expect("AllowlistAlways must fire Once");
+        let decision = decision_rx
+            .try_recv()
+            .expect("AllowlistAlways must fire Once");
         assert_eq!(decision, WireDecision::Once);
 
         // Pattern must be in the project-local settings.local.json, not user file.
@@ -1173,7 +1149,9 @@ mod tests {
         let loaded = crate::setup::load_settings(&local).unwrap();
         let allow = loaded["permissions"]["allow"].as_array().unwrap();
         assert!(
-            allow.iter().any(|v| v.as_str() == Some("Bash(echo always_test)")),
+            allow
+                .iter()
+                .any(|v| v.as_str() == Some("Bash(echo always_test)")),
             "pattern must be in project-local settings.local.json"
         );
     }
@@ -1182,11 +1160,9 @@ mod tests {
     fn allowlist_always_bare_tool_denies_with_reason() {
         use tempfile::TempDir;
         let dir = TempDir::new().unwrap();
-        let settings = dir.path().join("settings.json");
         let audit = dir.path().join("audit.log");
-        std::fs::write(&settings, r#"{}"#).unwrap();
 
-        let mut agg = new_agg_with_paths(&settings, &audit);
+        let mut agg = new_agg_with_paths(&audit);
 
         let (tx0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess_bare"), tx0);
@@ -1219,15 +1195,10 @@ mod tests {
 
         // Should be denied (bare-tool guardrail).
         let decision = decision_rx.try_recv().expect("AllowlistAlways must fire");
-        assert_eq!(decision, WireDecision::Deny, "bare-tool AllowlistAlways must deny");
-
-        // No pattern should be written.
-        let loaded = crate::setup::load_settings(&settings).unwrap();
-        let allow = loaded.get("permissions").and_then(|p| p.get("allow"));
-        assert!(
-            allow.map(|a| a.as_array().map(|arr| arr.is_empty()).unwrap_or(true))
-                .unwrap_or(true),
-            "bare-tool AllowlistAlways must not write any pattern"
+        assert_eq!(
+            decision,
+            WireDecision::Deny,
+            "bare-tool AllowlistAlways must deny"
         );
     }
 
@@ -1265,9 +1236,14 @@ mod tests {
         agg.handle_hook_event(event, respond_tx);
 
         // Must respond immediately with PermissionDecision::Once — no oneshot wait.
-        let response = respond_rx.try_recv().expect("short-circuit must fire immediately");
+        let response = respond_rx
+            .try_recv()
+            .expect("short-circuit must fire immediately");
         assert!(
-            matches!(response, HookResponse::PermissionDecision(WireDecision::Once)),
+            matches!(
+                response,
+                HookResponse::PermissionDecision(WireDecision::Once)
+            ),
             "permissive mode must auto-allow: got {response:?}",
         );
 
@@ -1301,7 +1277,9 @@ mod tests {
         agg.handle_permission_decision("toolu_xyz".to_owned(), WireDecision::Once);
 
         // The oneshot should have fired.
-        let decision = decision_rx.try_recv().expect("decision should have been fired");
+        let decision = decision_rx
+            .try_recv()
+            .expect("decision should have been fired");
         assert_eq!(decision, WireDecision::Once);
 
         // Session should no longer be waiting.
@@ -1322,7 +1300,10 @@ mod tests {
 
         // Register a pending approval.
         let (respond_tx, mut respond_rx) = oneshot::channel();
-        agg.handle_hook_event(pre_tool_use_event("sess", "toolu_timeout", "Bash"), respond_tx);
+        agg.handle_hook_event(
+            pre_tool_use_event("sess", "toolu_timeout", "Bash"),
+            respond_tx,
+        );
 
         // Consume the AwaitDecision response (we won't use it — simulating timeout).
         let _ = respond_rx.try_recv().unwrap();
@@ -1339,9 +1320,15 @@ mod tests {
         agg.broadcast_heartbeat();
 
         // State must be clean — no waiting, no prompt.
-        assert!(agg.pending_approvals.is_empty(), "pending approvals must be cleared");
+        assert!(
+            agg.pending_approvals.is_empty(),
+            "pending approvals must be cleared"
+        );
         assert_eq!(agg.snapshot().waiting, 0, "waiting must be 0 after timeout");
-        assert!(agg.snapshot().prompt.is_none(), "prompt must be None after timeout");
+        assert!(
+            agg.snapshot().prompt.is_none(),
+            "prompt must be None after timeout"
+        );
     }
 
     #[test]
@@ -1397,7 +1384,10 @@ mod tests {
         agg.tokens.today = 0;
         agg.tokens.date = "2026-05-20".to_owned();
 
-        assert_eq!(agg.tokens.cumulative, 50_000, "cumulative must survive reset");
+        assert_eq!(
+            agg.tokens.cumulative, 50_000,
+            "cumulative must survive reset"
+        );
         assert_eq!(agg.tokens.today, 0);
         assert_eq!(agg.tokens.date, "2026-05-20");
     }
@@ -1433,13 +1423,21 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_responds_to_get_heartbeat() {
-        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, hb_rx) = spawn(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            Arc::new(ArcSwap::new(
+                Arc::new(crate::permission::Allowlist::empty()),
+            )),
+        );
         drop(hb_rx); // not needed here
 
         let (respond_tx, respond_rx) = oneshot::channel();
-        tx.send(AggregatorMsg::GetHeartbeat { respond: respond_tx })
-            .await
-            .unwrap();
+        tx.send(AggregatorMsg::GetHeartbeat {
+            respond: respond_tx,
+        })
+        .await
+        .unwrap();
 
         let hb = respond_rx.await.unwrap();
         assert_eq!(hb.total, 0);
@@ -1447,7 +1445,13 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_session_start_increments_total() {
-        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, hb_rx) = spawn(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            Arc::new(ArcSwap::new(
+                Arc::new(crate::permission::Allowlist::empty()),
+            )),
+        );
         drop(hb_rx);
 
         let (respond_tx, respond_rx) = oneshot::channel();
@@ -1462,14 +1466,22 @@ mod tests {
         assert!(matches!(resp, HookResponse::Passthrough));
 
         let (hb_tx, hb_rx2) = oneshot::channel();
-        tx.send(AggregatorMsg::GetHeartbeat { respond: hb_tx }).await.unwrap();
+        tx.send(AggregatorMsg::GetHeartbeat { respond: hb_tx })
+            .await
+            .unwrap();
         let hb = hb_rx2.await.unwrap();
         assert_eq!(hb.total, 1);
     }
 
     #[tokio::test]
     async fn run_loop_pre_tool_use_then_permission_decision() {
-        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, mut hb_rx) = spawn(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            Arc::new(ArcSwap::new(
+                Arc::new(crate::permission::Allowlist::empty()),
+            )),
+        );
 
         // Start a session.
         let (r1_tx, r1_rx) = oneshot::channel();
@@ -1525,19 +1537,39 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_daily_reset_zeroes_today_keeps_cumulative() {
-        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, mut hb_rx) = spawn(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            Arc::new(ArcSwap::new(
+                Arc::new(crate::permission::Allowlist::empty()),
+            )),
+        );
 
-        tx.send(AggregatorMsg::TokensUpdate { output_tokens: 5_000 }).await.unwrap();
-        tx.send(AggregatorMsg::TokensUpdate { output_tokens: 3_000 }).await.unwrap();
+        tx.send(AggregatorMsg::TokensUpdate {
+            output_tokens: 5_000,
+        })
+        .await
+        .unwrap();
+        tx.send(AggregatorMsg::TokensUpdate {
+            output_tokens: 3_000,
+        })
+        .await
+        .unwrap();
 
         // Drain until we see cumulative=8000.
         loop {
             let hb = hb_rx.recv().await.unwrap();
-            if hb.tokens == 8_000 { break; }
+            if hb.tokens == 8_000 {
+                break;
+            }
         }
 
         // Reset.
-        tx.send(AggregatorMsg::DailyReset { date: "2026-05-20".to_owned() }).await.unwrap();
+        tx.send(AggregatorMsg::DailyReset {
+            date: "2026-05-20".to_owned(),
+        })
+        .await
+        .unwrap();
 
         loop {
             let hb = hb_rx.recv().await.unwrap();
@@ -1550,7 +1582,13 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_multiple_subscribers_all_receive_heartbeat() {
-        let (tx, hb_rx1) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, hb_rx1) = spawn(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            Arc::new(ArcSwap::new(
+                Arc::new(crate::permission::Allowlist::empty()),
+            )),
+        );
         // Subscribe a second receiver before sending any messages.
         let mut hb_rx2 = hb_rx1.resubscribe();
         let mut hb_rx1 = hb_rx1;
@@ -1568,11 +1606,15 @@ mod tests {
         // Both subscribers should see a heartbeat with total=1.
         let hb1 = loop {
             let h = hb_rx1.recv().await.unwrap();
-            if h.total == 1 { break h; }
+            if h.total == 1 {
+                break h;
+            }
         };
         let hb2 = loop {
             let h = hb_rx2.recv().await.unwrap();
-            if h.total == 1 { break h; }
+            if h.total == 1 {
+                break h;
+            }
         };
 
         assert_eq!(hb1.total, 1);

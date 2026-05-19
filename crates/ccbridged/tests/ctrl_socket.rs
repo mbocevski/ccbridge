@@ -18,7 +18,7 @@ use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 
 use ccbridged::emit::ctrl as ctrl_emit;
-use ccbridged::state::{AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator};
+use ccbridged::state::{spawn as spawn_aggregator, AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT};
 
 // ---------------------------------------------------------------------------
 // Test harness helpers
@@ -35,7 +35,13 @@ async fn setup() -> (TempDir, ccbridged::state::AggregatorTx, PathBuf) {
     // Create the ccbridge sub-directory that systemd would normally provision.
     std::fs::create_dir_all(runtime_dir.join("ccbridge")).expect("mkdir ccbridge");
 
-    let (agg_tx, hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, ccbridged::config::Fallback::default(), std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
+    let (agg_tx, hb_rx) = spawn_aggregator(
+        DEFAULT_APPROVAL_TIMEOUT,
+        ccbridged::config::Fallback::default(),
+        std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            ccbridged::permission::Allowlist::empty(),
+        ))),
+    );
 
     ctrl_emit::spawn(
         runtime_dir.clone(),
@@ -74,10 +80,7 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
 ) -> T {
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .await
-        .expect("read line");
+    reader.read_line(&mut line).await.expect("read line");
     serde_json::from_str(line.trim_end()).expect("deserialize JSON")
 }
 
@@ -377,42 +380,49 @@ async fn unsubscribe_stops_heartbeat_delivery() {
     let _: serde_json::Value = read_json(&mut reader).await;
 
     // Subscribe to heartbeats.
-    write_json(&mut writer, &serde_json::json!({"cmd": "subscribe", "topics": ["heartbeat"]})).await;
+    write_json(
+        &mut writer,
+        &serde_json::json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
     let ack: Ack = read_json(&mut reader).await;
     assert!(ack.ok, "subscribe ack must be ok");
 
     // Trigger a state change — a heartbeat should arrive.
     agg_tx
-        .send(AggregatorMsg::AddEntry { text: "before-unsub".to_owned() })
+        .send(AggregatorMsg::AddEntry {
+            text: "before-unsub".to_owned(),
+        })
         .await
         .unwrap();
     let hb = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let hb: Heartbeat = read_json(&mut reader).await;
-            return hb;
-        }
+        let hb: Heartbeat = read_json(&mut reader).await;
+        hb
     })
     .await
     .expect("heartbeat must arrive after subscribing");
     let _ = hb; // consumed
 
     // Now unsubscribe.
-    write_json(&mut writer, &serde_json::json!({"cmd": "unsubscribe", "topics": ["heartbeat"]})).await;
+    write_json(
+        &mut writer,
+        &serde_json::json!({"cmd": "unsubscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
     let ack: Ack = read_json(&mut reader).await;
     assert!(ack.ok, "unsubscribe ack must be ok");
 
     // Trigger another state change — this time NO heartbeat should arrive.
     agg_tx
-        .send(AggregatorMsg::AddEntry { text: "after-unsub".to_owned() })
+        .send(AggregatorMsg::AddEntry {
+            text: "after-unsub".to_owned(),
+        })
         .await
         .unwrap();
 
     let no_hb = tokio::time::timeout(Duration::from_millis(300), async {
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .expect("read line");
+        reader.read_line(&mut line).await.expect("read line");
         line
     })
     .await;

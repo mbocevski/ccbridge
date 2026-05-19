@@ -63,10 +63,12 @@ fn main() {
 }
 
 async fn daemon_main(tz_offset: i32) -> Result<()> {
+    use arc_swap::ArcSwap;
     use ccbridged::emit::{ctrl as ctrl_emit, http as http_emit, notify as notify_emit};
     use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
-    use arc_swap::ArcSwap;
-    use ccbridged::permission::{settings_path, spawn_settings_watcher, Allowlist, ProjectAllowlistCache};
+    use ccbridged::permission::{
+        settings_path, spawn_settings_watcher, Allowlist, ProjectAllowlistCache,
+    };
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -88,9 +90,7 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "XDG_RUNTIME_DIR not set; run under systemd or set it manually"
-            )
+            anyhow::anyhow!("XDG_RUNTIME_DIR not set; run under systemd or set it manually")
         })?;
 
     // Resolve owner name (async: shells out to git; fine inside the runtime).
@@ -98,13 +98,11 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     info!(owner = %owner, "resolved owner");
 
     // Token state path + load persisted state (best-effort; default on first run).
-    let tokens_path = jsonl_ingest::tokens_state_path()
-        .unwrap_or_else(|e| {
-            tracing::warn!("cannot determine token state path: {e:#}; persistence disabled");
-            std::path::PathBuf::from("/dev/null")
-        });
-    let initial_tokens = jsonl_ingest::PersistedTokens::load(&tokens_path)
-        .unwrap_or_default();
+    let tokens_path = jsonl_ingest::tokens_state_path().unwrap_or_else(|e| {
+        tracing::warn!("cannot determine token state path: {e:#}; persistence disabled");
+        std::path::PathBuf::from("/dev/null")
+    });
+    let initial_tokens = jsonl_ingest::PersistedTokens::load(&tokens_path).unwrap_or_default();
     info!(
         cumulative = initial_tokens.cumulative,
         today = initial_tokens.today,
@@ -137,11 +135,10 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     spawn_settings_watcher(sp.clone(), allowlist.clone());
 
     // Resolve audit log path for AllowlistAlways.
-    let audit_log = ccbridged::permission::additions::audit_log_path()
-        .unwrap_or_else(|e| {
-            tracing::warn!("cannot resolve audit log path: {e:#}; AllowlistAlways audit disabled");
-            std::path::PathBuf::from("/dev/null")
-        });
+    let audit_log = ccbridged::permission::additions::audit_log_path().unwrap_or_else(|e| {
+        tracing::warn!("cannot resolve audit log path: {e:#}; AllowlistAlways audit disabled");
+        std::path::PathBuf::from("/dev/null")
+    });
 
     // Build the per-project allowlist cache and spawn the aggregator.
     let allowlist_cache = Arc::new(ProjectAllowlistCache::new(Arc::clone(&allowlist)));
@@ -149,7 +146,6 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         config.approvals.timeout(),
         config.approvals.fallback,
         allowlist_cache,
-        sp,
         audit_log,
     );
 
@@ -189,16 +185,14 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     }
     if config.emit.http.enabled {
         match config.emit.http.addr.parse::<std::net::SocketAddr>() {
-            Ok(addr) => {
-                match http_emit::spawn(agg_tx.clone(), addr).await {
-                    Ok((_, bound)) => {
-                        info!(addr = %bound, "http: /status endpoint enabled");
-                    }
-                    Err(e) => {
-                        tracing::warn!("http: {e:#} — disabling HTTP endpoint");
-                    }
+            Ok(addr) => match http_emit::spawn(agg_tx.clone(), addr).await {
+                Ok((_, bound)) => {
+                    info!(addr = %bound, "http: /status endpoint enabled");
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("http: {e:#} — disabling HTTP endpoint");
+                }
+            },
             Err(e) => {
                 tracing::warn!(
                     "http: cannot parse addr {:?}: {e} — disabling HTTP endpoint",
