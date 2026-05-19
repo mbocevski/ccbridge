@@ -254,7 +254,7 @@ async fn golden_path() {
     assert!(output.status.success(), "hook must exit 0: {:?}", output.status);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("\"allow\"") || stdout.contains("allow"),
+        stdout.contains("\"permissionDecision\":\"allow\""),
         "hook stdout should contain allow decision, got: {stdout}",
     );
 
