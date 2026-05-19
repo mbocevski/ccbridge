@@ -30,13 +30,11 @@ fn main() {
         Some("setup") => ccbridged::setup::run(),
         Some("undo-last-allow") => {
             use ccbridged::permission::additions::{audit_log_path, undo_last_allow};
-            use ccbridged::permission::settings_path;
-            let sp = settings_path();
             let alp = audit_log_path().unwrap_or_else(|e| {
                 eprintln!("ccbridged: cannot locate audit log: {e:#}");
                 std::process::exit(1);
             });
-            if let Err(e) = undo_last_allow(&sp, &alp) {
+            if let Err(e) = undo_last_allow(&alp) {
                 eprintln!("ccbridged undo-last-allow: {e:#}");
                 std::process::exit(1);
             }

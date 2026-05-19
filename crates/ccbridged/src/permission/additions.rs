@@ -60,6 +60,27 @@ pub struct AdditionMetadata {
     pub agent_type: Option<String>,
 }
 
+/// Where an allowlist addition should be written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteTarget {
+    /// `<project_root>/.claude/settings.local.json`
+    /// Created (including the `.claude/` directory) if it doesn't exist.
+    ProjectLocal { root: std::path::PathBuf },
+    /// `~/.claude/settings.json` (user-global fallback).
+    UserGlobal,
+}
+
+/// Resolve the write target from a `cwd` path.
+///
+/// Walks up from `cwd` via [`find_project_root`]; falls back to
+/// [`WriteTarget::UserGlobal`] when no project root is found.
+pub fn resolve_write_target(cwd: &std::path::Path) -> WriteTarget {
+    match crate::permission::project::find_project_root(cwd) {
+        Some(root) => WriteTarget::ProjectLocal { root },
+        None => WriteTarget::UserGlobal,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pattern derivation
 // ---------------------------------------------------------------------------
@@ -117,18 +138,31 @@ pub fn derive_pattern(event: &PreToolUseEvent) -> DerivedPattern {
 // Settings.json writer
 // ---------------------------------------------------------------------------
 
-/// Append `pattern` to `settings.json`'s `permissions.allow` array and
-/// record the addition in the audit log.
+/// Append `pattern` to the allowlist file specified by `target` and record
+/// the addition in the audit log.
 ///
-/// Idempotent: if the pattern is already present, returns `Ok(())` without
-/// writing anything.
+/// - For `WriteTarget::ProjectLocal { root }`: writes to
+///   `<root>/.claude/settings.local.json`, creating `.claude/` if absent.
+/// - For `WriteTarget::UserGlobal`: writes to `~/.claude/settings.json`.
+///
+/// Idempotent: if the pattern is already present, returns `Ok(())`.
 pub fn write_allow_pattern(
-    settings_path: &Path,
+    target: &WriteTarget,
     pattern: &str,
     audit_log_path: &Path,
     metadata: AdditionMetadata,
 ) -> Result<()> {
-    let mut settings = load_settings(settings_path)
+    let settings_path = match target {
+        WriteTarget::ProjectLocal { root } => {
+            let dir = root.join(".claude");
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("mkdir -p {}", dir.display()))?;
+            dir.join("settings.local.json")
+        }
+        WriteTarget::UserGlobal => crate::permission::settings_path(),
+    };
+
+    let mut settings = load_settings(&settings_path)
         .with_context(|| format!("read {}", settings_path.display()))?;
 
     // Ensure settings["permissions"]["allow"] exists and is an array.
@@ -156,18 +190,19 @@ pub fn write_allow_pattern(
 
     arr.push(serde_json::Value::String(pattern.to_owned()));
 
-    save_settings(settings_path, &settings)
+    save_settings(&settings_path, &settings)
         .with_context(|| format!("write {}", settings_path.display()))?;
 
     // Append audit log entry.
-    append_audit_entry(audit_log_path, "added", pattern, &metadata)?;
+    append_audit_entry(audit_log_path, "added", pattern, &metadata, target)?;
 
     tracing::info!(
         pattern = %pattern,
         tool_use_id = %metadata.tool_use_id,
         session = %short_id(&metadata.session_id),
         agent = ?metadata.agent_type,
-        "allowlist: added pattern to settings.json",
+        ?target,
+        "allowlist: added pattern",
     );
 
     Ok(())
@@ -177,16 +212,14 @@ pub fn write_allow_pattern(
 // undo-last-allow
 // ---------------------------------------------------------------------------
 
-/// Remove the most-recent un-undone allowlist addition from `settings.json`
-/// and mark it as undone in the audit log.
+/// Remove the most-recent un-undone allowlist addition and mark it as undone.
 ///
-/// - If the pattern is not in settings.json (manually removed): prints a
-///   notice and returns `Ok(())`.
-/// - If the audit log is empty or has no `added` entries: returns an error.
-pub fn undo_last_allow(
-    settings_path: &Path,
-    audit_log_path: &Path,
-) -> Result<()> {
+/// The target file (project-local or user-global) is read from the audit log,
+/// so the caller doesn't need to pass a settings path.
+///
+/// - Pattern not in the target file (manually removed): prints a notice, returns `Ok(())`.
+/// - Audit log empty / no `added` entries: returns an `Err`.
+pub fn undo_last_allow(audit_log_path: &Path) -> Result<()> {
     let entry = find_last_undone_addition(audit_log_path)
         .context("reading audit log")?
         .ok_or_else(|| anyhow::anyhow!(
@@ -194,7 +227,15 @@ pub fn undo_last_allow(
             audit_log_path.display()
         ))?;
 
-    let mut settings = load_settings(settings_path)
+    // Resolve path from the target stored in the audit log.
+    let settings_path = match &entry.target {
+        WriteTarget::ProjectLocal { root } =>
+            root.join(".claude").join("settings.local.json"),
+        WriteTarget::UserGlobal =>
+            crate::permission::settings_path(),
+    };
+
+    let mut settings = load_settings(&settings_path)
         .with_context(|| format!("read {}", settings_path.display()))?;
 
     let allow_arr = settings
@@ -205,8 +246,9 @@ pub fn undo_last_allow(
     match allow_arr {
         None => {
             println!(
-                "Pattern {:?} not present in settings.json (already removed?).",
-                entry.pattern
+                "Pattern {:?} not present in {} (already removed?).",
+                entry.pattern,
+                settings_path.display(),
             );
         }
         Some(arr) => {
@@ -214,13 +256,18 @@ pub fn undo_last_allow(
             arr.retain(|v| v.as_str() != Some(&entry.pattern));
             if arr.len() == before {
                 println!(
-                    "Pattern {:?} not present in settings.json (already removed?).",
-                    entry.pattern
+                    "Pattern {:?} not present in {} (already removed?).",
+                    entry.pattern,
+                    settings_path.display(),
                 );
             } else {
-                save_settings(settings_path, &settings)
+                save_settings(&settings_path, &settings)
                     .with_context(|| format!("write {}", settings_path.display()))?;
-                println!("Removed pattern {:?} from settings.json.", entry.pattern);
+                println!(
+                    "Removed pattern {:?} from {}.",
+                    entry.pattern,
+                    settings_path.display(),
+                );
             }
         }
     }
@@ -235,6 +282,7 @@ pub fn undo_last_allow(
             session_id: entry.session_id,
             agent_type: entry.agent_type,
         },
+        &entry.target,
     )?;
 
     Ok(())
@@ -258,12 +306,16 @@ pub fn audit_log_path() -> anyhow::Result<std::path::PathBuf> {
 
 /// Append one TSV line to the audit log.
 ///
-/// Format: `{timestamp}\t{op}\t{pattern}\t{tool_use_id}\t{session_short}\t{agent}\n`
+/// Format (7 columns):
+/// `{ts}\t{op}\t{pattern}\t{tool_use_id}\t{session_short}\t{agent}\t{target}\n`
+///
+/// `{target}` is `project:<abs_path>` or `user`.
 fn append_audit_entry(
     log_path: &Path,
     op: &str,
     pattern: &str,
     metadata: &AdditionMetadata,
+    target: &WriteTarget,
 ) -> Result<()> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -272,8 +324,12 @@ fn append_audit_entry(
     let ts = utc_now_iso8601();
     let session_short = short_id(&metadata.session_id);
     let agent = metadata.agent_type.as_deref().unwrap_or("");
+    let target_col = match target {
+        WriteTarget::ProjectLocal { root } => format!("project:{}", root.display()),
+        WriteTarget::UserGlobal => "user".to_owned(),
+    };
     let line = format!(
-        "{ts}\t{op}\t{pattern}\t{tool_use_id}\t{session_short}\t{agent}\n",
+        "{ts}\t{op}\t{pattern}\t{tool_use_id}\t{session_short}\t{agent}\t{target_col}\n",
         tool_use_id = metadata.tool_use_id,
     );
 
@@ -294,10 +350,15 @@ struct AuditEntry {
     tool_use_id: String,
     session_id: String,
     agent_type: Option<String>,
+    target: WriteTarget,
 }
 
 /// Find the most-recent `added` line in the audit log that has no subsequent
 /// `undone` line for the same pattern + tool_use_id pair.
+///
+/// The 7th column (target) is parsed when present; missing column or
+/// unrecognised value → `WriteTarget::UserGlobal` (backwards compat with
+/// 6-column logs from earlier daemon versions).
 fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
     if !log_path.exists() {
         return Ok(None);
@@ -310,13 +371,14 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
     let mut result: Option<AuditEntry> = None;
 
     for line in text.lines().rev() {
-        let cols: Vec<&str> = line.splitn(6, '\t').collect();
+        // splitn(7) — up to 7 columns; 7th may be absent (legacy lines).
+        let cols: Vec<&str> = line.splitn(7, '\t').collect();
         if cols.len() < 3 {
             continue;
         }
         let op = cols[1];
         let pattern = cols[2];
-        let tool_use_id = if cols.len() > 3 { cols[3] } else { "" };
+        let tool_use_id = cols.get(3).copied().unwrap_or("");
         let key = format!("{pattern}\x00{tool_use_id}");
 
         match op {
@@ -324,17 +386,28 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
                 undone_keys.insert(key);
             }
             "added" if !undone_keys.contains(&key) => {
-                let session_short = if cols.len() > 4 { cols[4] } else { "" };
-                let agent = if cols.len() > 5 && !cols[5].is_empty() {
-                    Some(cols[5].to_owned())
-                } else {
-                    None
+                let session_short = cols.get(4).copied().unwrap_or("");
+                let agent = cols.get(5).copied().filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+
+                // Parse target column (col 6); missing/unknown → UserGlobal.
+                let target = {
+                    let raw = cols.get(6).copied().unwrap_or("user");
+                    if let Some(path) = raw.strip_prefix("project:") {
+                        WriteTarget::ProjectLocal {
+                            root: std::path::PathBuf::from(path),
+                        }
+                    } else {
+                        WriteTarget::UserGlobal
+                    }
                 };
+
                 result = Some(AuditEntry {
                     pattern: pattern.to_owned(),
                     tool_use_id: tool_use_id.to_owned(),
                     session_id: session_short.to_owned(),
                     agent_type: agent,
+                    target,
                 });
                 break;
             }
@@ -537,9 +610,14 @@ mod tests {
         let audit = dir.path().join("audit.log");
         std::fs::write(&settings, r#"{"theme":"dark"}"#).unwrap();
 
-        write_allow_pattern(&settings, "Bash(git status)", &audit, meta()).unwrap();
+        // Use UserGlobal target pointing at our temp settings file.
+        // (We can't use WriteTarget::UserGlobal directly since it resolves
+        // to ~/.claude/settings.json, so we test via ProjectLocal.)
+        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        write_allow_pattern(&target, "Bash(git status)", &audit, meta()).unwrap();
 
-        let loaded = crate::setup::load_settings(&settings).unwrap();
+        let loaded_path = dir.path().join(".claude").join("settings.local.json");
+        let loaded = crate::setup::load_settings(&loaded_path).unwrap();
         let allow = loaded["permissions"]["allow"].as_array().unwrap();
         assert_eq!(allow.len(), 1);
         assert_eq!(allow[0], "Bash(git status)");
@@ -548,14 +626,14 @@ mod tests {
     #[test]
     fn write_allow_pattern_idempotent() {
         let dir = TempDir::new().unwrap();
-        let settings = dir.path().join("settings.json");
         let audit = dir.path().join("audit.log");
-        std::fs::write(&settings, r#"{}"#).unwrap();
+        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
 
-        write_allow_pattern(&settings, "Bash(echo hi)", &audit, meta()).unwrap();
-        write_allow_pattern(&settings, "Bash(echo hi)", &audit, meta()).unwrap();
+        write_allow_pattern(&target, "Bash(echo hi)", &audit, meta()).unwrap();
+        write_allow_pattern(&target, "Bash(echo hi)", &audit, meta()).unwrap();
 
-        let loaded = crate::setup::load_settings(&settings).unwrap();
+        let loaded_path = dir.path().join(".claude").join("settings.local.json");
+        let loaded = crate::setup::load_settings(&loaded_path).unwrap();
         let allow = loaded["permissions"]["allow"].as_array().unwrap();
         assert_eq!(allow.len(), 1, "duplicate pattern must not be added");
     }
@@ -563,11 +641,10 @@ mod tests {
     #[test]
     fn write_allow_pattern_writes_audit_log() {
         let dir = TempDir::new().unwrap();
-        let settings = dir.path().join("settings.json");
         let audit = dir.path().join("audit.log");
-        std::fs::write(&settings, r#"{}"#).unwrap();
+        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
 
-        write_allow_pattern(&settings, "Read(/tmp/file.txt)", &audit, meta()).unwrap();
+        write_allow_pattern(&target, "Read(/tmp/file.txt)", &audit, meta()).unwrap();
 
         let log = std::fs::read_to_string(&audit).unwrap();
         assert!(log.contains("added"), "audit log must contain 'added' op");
@@ -581,35 +658,34 @@ mod tests {
     #[test]
     fn undo_last_allow_removes_pattern() {
         let dir = TempDir::new().unwrap();
-        let settings = dir.path().join("settings.json");
         let audit = dir.path().join("audit.log");
-        std::fs::write(&settings, r#"{}"#).unwrap();
+        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
 
-        write_allow_pattern(&settings, "Bash(echo undo_me)", &audit, meta()).unwrap();
+        write_allow_pattern(&target, "Bash(echo undo_me)", &audit, meta()).unwrap();
 
-        // Verify it was added.
-        let loaded = crate::setup::load_settings(&settings).unwrap();
-        assert_eq!(loaded["permissions"]["allow"].as_array().unwrap().len(), 1);
+        let loaded_path = dir.path().join(".claude").join("settings.local.json");
+        assert_eq!(
+            crate::setup::load_settings(&loaded_path).unwrap()
+                ["permissions"]["allow"].as_array().unwrap().len(),
+            1
+        );
 
-        undo_last_allow(&settings, &audit).unwrap();
+        undo_last_allow(&audit).unwrap();
 
-        let loaded = crate::setup::load_settings(&settings).unwrap();
-        let allow = loaded["permissions"]["allow"].as_array().unwrap();
+        let allow = crate::setup::load_settings(&loaded_path).unwrap()
+            ["permissions"]["allow"].as_array().unwrap().to_owned();
         assert!(allow.is_empty(), "pattern must be removed after undo");
 
-        // Audit log must have an 'undone' entry.
         let log = std::fs::read_to_string(&audit).unwrap();
-        assert!(log.contains("undone"), "audit log must contain 'undone' entry after undo");
+        assert!(log.contains("undone"), "audit log must contain 'undone' after undo");
     }
 
     #[test]
     fn undo_last_allow_empty_audit_returns_error() {
         let dir = TempDir::new().unwrap();
-        let settings = dir.path().join("settings.json");
         let audit = dir.path().join("audit.log"); // doesn't exist
-        std::fs::write(&settings, r#"{}"#).unwrap();
 
-        let err = undo_last_allow(&settings, &audit).unwrap_err();
+        let err = undo_last_allow(&audit).unwrap_err();
         assert!(
             err.to_string().contains("no allowlist additions"),
             "error message must mention empty audit log"
@@ -618,19 +694,119 @@ mod tests {
 
     #[test]
     fn undo_last_allow_idempotent_when_pattern_already_gone() {
-        // Pattern written to audit log but manually removed from settings.json.
-        // undo should not error; just print a notice.
         let dir = TempDir::new().unwrap();
-        let settings = dir.path().join("settings.json");
         let audit = dir.path().join("audit.log");
-        std::fs::write(&settings, r#"{}"#).unwrap();
+        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
 
-        write_allow_pattern(&settings, "Bash(already_gone)", &audit, meta()).unwrap();
+        write_allow_pattern(&target, "Bash(already_gone)", &audit, meta()).unwrap();
 
-        // Manually remove the pattern from settings.json.
-        std::fs::write(&settings, r#"{"permissions":{"allow":[]}}"#).unwrap();
+        // Manually empty the allow list.
+        let local_settings = dir.path().join(".claude").join("settings.local.json");
+        std::fs::write(&local_settings, r#"{"permissions":{"allow":[]}}"#).unwrap();
 
-        // undo should succeed without panic, just noting it wasn't there.
-        undo_last_allow(&settings, &audit).unwrap();
+        undo_last_allow(&audit).unwrap(); // must not panic
+    }
+
+    // -----------------------------------------------------------------------
+    // P3: new tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_allow_pattern_project_local_creates_dotclaude_dir() {
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        // No .claude/ dir yet.
+        assert!(!dir.path().join(".claude").exists());
+
+        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        write_allow_pattern(&target, "Bash(npm test)", &audit, meta()).unwrap();
+
+        let local = dir.path().join(".claude").join("settings.local.json");
+        assert!(local.exists(), "settings.local.json must be created");
+        let loaded = crate::setup::load_settings(&local).unwrap();
+        assert_eq!(
+            loaded["permissions"]["allow"].as_array().unwrap()[0],
+            "Bash(npm test)"
+        );
+    }
+
+    #[test]
+    fn write_allow_pattern_project_local_records_target_in_audit() {
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+
+        write_allow_pattern(&target, "Skill", &audit, meta()).unwrap();
+
+        let log = std::fs::read_to_string(&audit).unwrap();
+        let expected = format!("project:{}", dir.path().display());
+        assert!(
+            log.contains(&expected),
+            "audit log must contain project:<root>, got:\n{log}"
+        );
+    }
+
+    #[test]
+    fn write_allow_pattern_user_global_records_user_target() {
+        // We can't write to the real user settings.json in tests,
+        // but we can build a fake UserGlobal that writes somewhere we control
+        // by mocking via ProjectLocal (or just test that the target encoding is right).
+        // Here we verify the 7th column encoding via a direct append_audit_entry call.
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let metadata = meta();
+
+        append_audit_entry(&audit, "added", "Skill", &metadata, &WriteTarget::UserGlobal).unwrap();
+
+        let log = std::fs::read_to_string(&audit).unwrap();
+        let cols: Vec<&str> = log.trim_end_matches('\n').split('\t').collect();
+        assert_eq!(cols.get(6).copied(), Some("user"), "7th column must be 'user'");
+    }
+
+    #[test]
+    fn undo_last_allow_target_aware_project_local() {
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+
+        write_allow_pattern(&target, "Bash(npm test)", &audit, meta()).unwrap();
+
+        let local = dir.path().join(".claude").join("settings.local.json");
+        assert_eq!(
+            crate::setup::load_settings(&local).unwrap()
+                ["permissions"]["allow"].as_array().unwrap().len(),
+            1,
+            "pattern must be in project-local file"
+        );
+
+        undo_last_allow(&audit).unwrap();
+
+        let allow = crate::setup::load_settings(&local).unwrap()
+            ["permissions"]["allow"].as_array().unwrap().to_owned();
+        assert!(allow.is_empty(), "pattern must be removed from project-local file");
+    }
+
+    #[test]
+    fn find_last_undone_addition_legacy_6_column_treats_as_user() {
+        // A 6-column legacy line (no target column) must parse as
+        // WriteTarget::UserGlobal — backwards-compat for audit logs from
+        // earlier daemon versions.
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let legacy_line = "2026-01-01T00:00:00Z\tadded\tBash(legacy)\ttoolu_old\tabc123\t\n";
+        std::fs::write(&audit, legacy_line).unwrap();
+
+        let entry = find_last_undone_addition(&audit).unwrap().expect("entry");
+        assert_eq!(entry.pattern, "Bash(legacy)");
+        assert!(matches!(entry.target, WriteTarget::UserGlobal));
+    }
+
+    #[test]
+    fn resolve_write_target_returns_user_global_for_unrooted_cwd() {
+        // No .claude/ or .git anywhere in the path → UserGlobal fallback.
+        let target = resolve_write_target(std::path::Path::new(
+            "/nonexistent-ccbridge-test-xyz/sub",
+        ));
+        assert!(matches!(target, WriteTarget::UserGlobal));
     }
 }

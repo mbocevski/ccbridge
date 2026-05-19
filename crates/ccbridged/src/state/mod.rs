@@ -615,7 +615,8 @@ impl Aggregator {
 
     fn handle_allowlist_always(&mut self, tool_use_id: ToolUseId) {
         use crate::permission::additions::{
-            derive_pattern, write_allow_pattern, AdditionMetadata, DerivedPattern,
+            derive_pattern, resolve_write_target, write_allow_pattern,
+            AdditionMetadata, DerivedPattern, WriteTarget,
         };
 
         // Look up the stashed PreToolUseEvent for this approval.
@@ -635,18 +636,28 @@ impl Aggregator {
 
         match derive_pattern(&event) {
             DerivedPattern::Specific(pattern) => {
+                let target = resolve_write_target(
+                    std::path::Path::new(&event.base.cwd),
+                );
+                if matches!(target, WriteTarget::UserGlobal) {
+                    warn!(
+                        cwd = %event.base.cwd,
+                        "AllowlistAlways: no project root found; \
+                         falling back to user-global write",
+                    );
+                }
                 let metadata = AdditionMetadata {
                     tool_use_id: tool_use_id.clone(),
                     session_id: event.base.session_id.clone(),
                     agent_type: event.agent_type.clone(),
                 };
                 match write_allow_pattern(
-                    &self.settings_path,
+                    &target,
                     &pattern,
                     &self.audit_log_path,
                     metadata,
                 ) {
-                    Ok(()) => info!(%pattern, "AllowlistAlways: wrote allow pattern"),
+                    Ok(()) => info!(%pattern, ?target, "AllowlistAlways: wrote allow pattern"),
                     Err(e) => warn!("AllowlistAlways: failed to write pattern: {e:#}"),
                 }
                 // Approve this specific call regardless of write success.
@@ -654,18 +665,11 @@ impl Aggregator {
                 self.handle_permission_decision(tool_use_id, WireDecision::Once);
             }
             DerivedPattern::BareToolNeedsConfirmation { tool } => {
-                // A bare-tool pattern like `Bash` would allow ALL future Bash calls —
-                // almost certainly not what the user wants.  Deny this call with a
-                // clear reason rather than silently writing an overly broad pattern.
                 warn!(
                     %tool,
                     tool_use_id = %tool_use_id,
                     "AllowlistAlways: no specific pattern derivable; denying",
                 );
-                // The deny reason is surfaced via HardDeny in handle_permission_decision
-                // path.  We re-use PermissionDecision(Deny) here; the swaync emitter
-                // will show the deny.  A future enhancement could surface a more
-                // specific error notification.
                 self.handle_permission_decision(tool_use_id, WireDecision::Deny);
             }
         }
@@ -1119,25 +1123,28 @@ mod tests {
         agg
     }
 
-    #[test]
-    fn allowlist_always_writes_pattern() {
+    #[tokio::test]
+    async fn allowlist_always_writes_project_local_when_cwd_has_root() {
         use tempfile::TempDir;
         let dir = TempDir::new().unwrap();
-        let settings = dir.path().join("settings.json");
+        // Create .claude/ so find_project_root returns this dir as the root.
+        std::fs::create_dir(dir.path().join(".claude")).unwrap();
         let audit = dir.path().join("audit.log");
-        std::fs::write(&settings, r#"{}"#).unwrap();
 
-        let mut agg = new_agg_with_paths(&settings, &audit);
+        let mut agg = new_agg_with_paths(
+            std::path::Path::new("/dev/null"),  // settings_path unused for Always now
+            &audit,
+        );
 
         let (tx0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess_always"), tx0);
 
-        // Fire a Bash PreToolUse — should derive "Bash(echo always_test)".
+        let cwd = dir.path().to_str().unwrap().to_owned();
         let event = HookEvent::PreToolUse(PreToolUseEvent {
             base: HookBase {
                 session_id: "sess_always".to_owned(),
-                transcript_path: "/tmp/always.jsonl".to_owned(),
-                cwd: "/tmp".to_owned(),
+                transcript_path: format!("{}/always.jsonl", cwd),
+                cwd: cwd.clone(),
             },
             permission_mode: PermissionMode::Default,
             effort: None,
@@ -1150,25 +1157,24 @@ mod tests {
         let (respond_tx, mut respond_rx) = oneshot::channel();
         agg.handle_hook_event(event, respond_tx);
 
-        // Extract decision receiver from AwaitDecision.
         let mut decision_rx = match respond_rx.try_recv().unwrap() {
             HookResponse::AwaitDecision { rx, .. } => rx,
             _ => panic!("expected AwaitDecision"),
         };
 
-        // Trigger AllowlistAlways.
         agg.handle_allowlist_always("toolu_always_01".to_owned());
 
-        // Decision should be Once (approved).
         let decision = decision_rx.try_recv().expect("AllowlistAlways must fire Once");
         assert_eq!(decision, WireDecision::Once);
 
-        // Pattern should be in settings.json.
-        let loaded = crate::setup::load_settings(&settings).unwrap();
+        // Pattern must be in the project-local settings.local.json, not user file.
+        let local = dir.path().join(".claude").join("settings.local.json");
+        assert!(local.exists(), "settings.local.json must be created");
+        let loaded = crate::setup::load_settings(&local).unwrap();
         let allow = loaded["permissions"]["allow"].as_array().unwrap();
         assert!(
             allow.iter().any(|v| v.as_str() == Some("Bash(echo always_test)")),
-            "pattern must be in settings.json allow list"
+            "pattern must be in project-local settings.local.json"
         );
     }
 
