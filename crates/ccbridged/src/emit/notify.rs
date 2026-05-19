@@ -296,7 +296,10 @@ async fn handle_heartbeat(
                 .map(shorten_cwd)
                 .filter(|s| !s.is_empty());
             let agent_or_main = prompt.agent_type.as_deref().unwrap_or("main");
-            let session_short = prompt.session_id.as_deref().map(short_session_id);
+            let session_short = prompt
+                .session_id
+                .as_deref()
+                .map(crate::util::short_session_id);
 
             // Summary: include cwd when available so parallel notifications
             // are visually distinct in the swaync stack.
@@ -610,11 +613,6 @@ pub fn shorten_cwd_with_home(cwd: &str, home: &str) -> String {
     }
 }
 
-/// Return the first 6 characters of a session UUID (git-SHA style).
-pub fn short_session_id(id: &str) -> String {
-    id.chars().take(6).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,15 +679,5 @@ mod tests {
     #[test]
     fn shorten_cwd_root_returns_slash() {
         assert_eq!(shorten_cwd_with_home("/", "/home/u"), "/");
-    }
-
-    #[test]
-    fn short_session_id_takes_six_chars() {
-        assert_eq!(
-            short_session_id("3cb58992-935c-4fdd-9efd-1f160946e822"),
-            "3cb589"
-        );
-        // Short id (unlikely in practice, but defensive).
-        assert_eq!(short_session_id("abc"), "abc");
     }
 }

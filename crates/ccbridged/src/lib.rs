@@ -14,3 +14,6 @@ pub mod state;
 
 // Config module — public so tests and main.rs can reach it.
 pub mod config;
+
+// Shared utilities (XDG paths, short_session_id, etc.).
+pub mod util;

@@ -227,7 +227,7 @@ pub fn write_allow_pattern(
     tracing::info!(
         pattern = %pattern,
         tool_use_id = %metadata.tool_use_id,
-        session = %short_id(&metadata.session_id),
+        session = %crate::util::short_session_id(&metadata.session_id),
         agent = ?metadata.agent_type,
         root = %target.root.display(),
         "allowlist: added pattern",
@@ -322,14 +322,9 @@ pub fn undo_last_allow(audit_log_path: &Path) -> Result<()> {
 
 /// Audit log path: `$XDG_STATE_HOME/ccbridge/allowlist-additions.log`.
 pub fn audit_log_path() -> anyhow::Result<std::path::PathBuf> {
-    let base = if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
-        std::path::PathBuf::from(xdg)
-    } else if let Some(home) = std::env::var_os("HOME") {
-        std::path::PathBuf::from(home).join(".local").join("state")
-    } else {
-        anyhow::bail!("neither $XDG_STATE_HOME nor $HOME is set");
-    };
-    Ok(base.join("ccbridge").join("allowlist-additions.log"))
+    Ok(crate::util::xdg_state_dir()?
+        .join("ccbridge")
+        .join("allowlist-additions.log"))
 }
 
 /// Append one TSV line to the audit log.
@@ -350,7 +345,7 @@ fn append_audit_entry(
     }
 
     let ts = utc_now_iso8601();
-    let session_short = short_id(&metadata.session_id);
+    let session_short = crate::util::short_session_id(&metadata.session_id);
     let agent = metadata.agent_type.as_deref().unwrap_or("");
     let target_col = match target {
         AuditTarget::ProjectLocal { root } => format!("project:{}", root.display()),
@@ -452,10 +447,6 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
 // ---------------------------------------------------------------------------
 // Small utilities
 // ---------------------------------------------------------------------------
-
-fn short_id(id: &str) -> String {
-    id.chars().take(6).collect()
-}
 
 fn utc_now_iso8601() -> String {
     // Simple: seconds-since-epoch formatted as ISO 8601 UTC.

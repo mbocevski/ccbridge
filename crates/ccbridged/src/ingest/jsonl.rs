@@ -93,16 +93,9 @@ impl PersistedTokens {
 /// The caller should log the error and disable token persistence rather than
 /// falling back to `/tmp` (world-readable, collision-prone on multi-user boxes).
 pub fn tokens_state_path() -> Result<PathBuf> {
-    let base = if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
-        PathBuf::from(xdg)
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local").join("state")
-    } else {
-        anyhow::bail!(
-            "cannot determine token state path: neither $XDG_STATE_HOME nor $HOME is set"
-        );
-    };
-    Ok(base.join("ccbridge").join("tokens.json"))
+    Ok(crate::util::xdg_state_dir()?
+        .join("ccbridge")
+        .join("tokens.json"))
 }
 
 // ---------------------------------------------------------------------------

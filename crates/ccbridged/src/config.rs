@@ -255,13 +255,9 @@ fn default_true() -> bool {
 /// 1. `$XDG_CONFIG_HOME/ccbridge/config.toml`
 /// 2. `$HOME/.config/ccbridge/config.toml`
 pub fn config_path() -> PathBuf {
-    let base = if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg)
-    } else {
-        let home = std::env::var_os("HOME").unwrap_or_else(|| std::ffi::OsString::from("/"));
-        PathBuf::from(home).join(".config")
-    };
-    base.join("ccbridge").join("config.toml")
+    crate::util::xdg_config_dir()
+        .join("ccbridge")
+        .join("config.toml")
 }
 
 // ---------------------------------------------------------------------------
