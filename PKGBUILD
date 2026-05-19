@@ -17,7 +17,7 @@ sha256sums=('SKIP')
 pkgver() {
     cd "$srcdir/ccbridge"
     local desc
-    desc=$(git describe --long --tags 2>/dev/null)
+    desc=$(git describe --long --tags 2>/dev/null) || true
     if [[ -n "$desc" ]]; then
         echo "$desc" | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
     else
