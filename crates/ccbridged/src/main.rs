@@ -16,17 +16,6 @@
 //!
 //! * `ble` (default) — BlueZ/bluer NUS peripheral.  Pixelbook builds pass
 //!   `--no-default-features`; all other emit paths compile unconditionally.
-//!
-//! # Modules (stubs until their respective tasks are implemented)
-//!
-//! * `ingest::hooks`  — Unix socket listener for ccbridge-hook events
-//! * `ingest::jsonl`  — inotify-driven tail of ~/.claude/projects/**/*.jsonl
-//! * `state`          — Aggregator (single-writer task, mpsc fanout)
-//! * `emit::swaync`   — DBus notification emitter
-//! * `emit::ble`      — BlueZ NUS peripheral (feature = "ble")
-//! * `emit::ctrl`     — bidirectional control socket
-//! * `emit::http`     — optional HTTP /status (runtime-gated by config)
-//! * `config`         — config.toml loader
 
 use anyhow::Result;
 use tracing::info;
@@ -41,10 +30,15 @@ fn main() {
             std::process::exit(1);
         }
         None => {
-            // Default: run as the daemon.
+            // Resolve the local TZ offset BEFORE the tokio thread pool starts.
+            // The `time` crate's current_local_offset() is unsafe to call from
+            // a multi-threaded context (glibc TZ env-var race); calling it here
+            // in the single-threaded sync main is the documented safe pattern.
+            let tz_offset = ccbridged::emit::ctrl::resolve_tz_offset();
+
             tokio::runtime::Runtime::new()
                 .expect("tokio runtime")
-                .block_on(daemon_main())
+                .block_on(daemon_main(tz_offset))
                 .unwrap_or_else(|e| {
                     eprintln!("ccbridged: fatal: {e:#}");
                     std::process::exit(1);
@@ -53,7 +47,11 @@ fn main() {
     }
 }
 
-async fn daemon_main() -> Result<()> {
+async fn daemon_main(tz_offset: i32) -> Result<()> {
+    use ccbridged::emit::{ctrl as ctrl_emit, swaync as swaync_emit};
+    use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
+    use ccbridged::state::{spawn as spawn_aggregator, DEFAULT_APPROVAL_TIMEOUT};
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -63,17 +61,71 @@ async fn daemon_main() -> Result<()> {
 
     info!("ccbridged starting");
 
-    // TODO (task 362c957e): start hook ingest socket
-    // TODO (task 362c957e): start Aggregator
-    // TODO (task 27993d8d): start JSONL tail
-    // TODO (task 0432dcb9): wire approval flow
-    // TODO (task 1351d215): start control socket
-    // TODO (task 8564c3f5): load config
+    // Resolve the runtime dir (systemd provisions $XDG_RUNTIME_DIR/ccbridge/).
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "XDG_RUNTIME_DIR not set; run under systemd or set it manually"
+            )
+        })?;
+
+    // Resolve owner name (async: shells out to git; fine inside the runtime).
+    let owner = ctrl_emit::resolve_owner().await;
+    info!(owner = %owner, "resolved owner");
+
+    // Token state path + load persisted state (best-effort; default on first run).
+    let tokens_path = jsonl_ingest::tokens_state_path()
+        .unwrap_or_else(|e| {
+            tracing::warn!("cannot determine token state path: {e:#}; persistence disabled");
+            std::path::PathBuf::from("/dev/null")
+        });
+    let initial_tokens = jsonl_ingest::PersistedTokens::load(&tokens_path)
+        .unwrap_or_default();
+    info!(
+        cumulative = initial_tokens.cumulative,
+        today = initial_tokens.today,
+        "loaded token state",
+    );
+
+    // Spawn the aggregator (single-writer state task + broadcast channel).
+    let (agg_tx, hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT);
+
+    // Spawn hook ingest socket.
+    hook_ingest::spawn(runtime_dir.clone(), agg_tx.clone());
+
+    // Spawn JSONL watcher + midnight-reset task (skip if projects dir absent —
+    // it won't exist on a fresh machine until Claude Code first runs).
+    let projects_dir = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".claude").join("projects"))
+        .ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
+
+    if projects_dir.exists() {
+        jsonl_ingest::spawn_watcher(
+            projects_dir,
+            tokens_path.clone(),
+            agg_tx.clone(),
+            initial_tokens,
+        );
+        jsonl_ingest::spawn_midnight_reset(tokens_path, agg_tx.clone());
+    } else {
+        tracing::warn!(
+            dir = %projects_dir.display(),
+            "~/.claude/projects/ does not exist; JSONL watcher disabled \
+             (will be active after first Claude Code session)",
+        );
+    }
+
+    // Spawn emit tasks.
+    // swaync subscribes via resubscribe() so ctrl can consume hb_rx directly.
+    swaync_emit::spawn(agg_tx.clone(), hb_rx.resubscribe());
+    ctrl_emit::spawn(runtime_dir, agg_tx, hb_rx, owner, tz_offset);
 
     info!("ccbridged ready");
 
     // Tell systemd we're ready (Type=notify in the unit file).
-    // Best-effort: under non-systemd contexts (cargo run) this is a no-op.
+    // Best-effort: no-op when NOTIFY_SOCKET is unset (e.g. cargo run).
     if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
         tracing::debug!("sd_notify ready failed (not running under systemd?): {e}");
     }
