@@ -79,6 +79,12 @@ pub enum AggregatorMsg {
     /// JSONL midnight-reset task before it sends this message, so the aggregator
     /// never needs to compute dates itself.
     DailyReset { date: String },
+
+    /// Push a transcript entry into the entries ring buffer (capacity 8).
+    ///
+    /// Sent by the JSONL tail when it extracts assistant text content or tool
+    /// summaries that should appear in `heartbeat.entries`.
+    AddEntry { text: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +484,10 @@ impl Aggregator {
                             debug!(today = self.tokens.today, new_date = %date, "daily token reset");
                             self.tokens.today = 0;
                             self.tokens.date = date;
+                            self.broadcast_heartbeat();
+                        }
+                        Some(AggregatorMsg::AddEntry { text }) => {
+                            self.push_entry(text);
                             self.broadcast_heartbeat();
                         }
                     }

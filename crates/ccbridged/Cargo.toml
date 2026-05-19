@@ -34,6 +34,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+# JSONL tail filesystem watcher (daemon-specific, not shared via workspace)
+notify = "6"
+# Local time for daily reset (daemon-specific)
+time = { version = "0.3", features = ["local-offset", "macros", "formatting"] }
 
 [dev-dependencies]
 tempfile = "3"
