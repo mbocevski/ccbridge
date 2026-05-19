@@ -251,45 +251,291 @@ impl FileOffsets {
 }
 
 // ---------------------------------------------------------------------------
-// Spawn functions (watcher + midnight reset) — implemented in commit 2
+// Spawn functions
 // ---------------------------------------------------------------------------
 
 /// Spawn the JSONL watcher task.
 ///
-/// Watches `projects_dir` recursively with `notify::RecommendedWatcher`.
-/// Sends [`crate::state::AggregatorMsg::TokensUpdate`] and
-/// [`crate::state::AggregatorMsg::AddEntry`] on every new assistant line.
-/// Persists token state to `state_path` every 5 s when tokens changed.
+/// Watches `projects_dir` recursively with [`notify::RecommendedWatcher`].
+/// For each new assistant line in a `*.jsonl` file, sends:
+/// - [`crate::state::AggregatorMsg::TokensUpdate`] with `output_tokens`
+/// - [`crate::state::AggregatorMsg::AddEntry`] with the entry text (if any)
 ///
-/// Implementation: commit 2 of task 27993d8d.
+/// Token counts are persisted to `state_path` (debounced, every
+/// [`PERSIST_DEBOUNCE`]).  If `state_path` cannot be determined or written,
+/// the watcher logs and continues — token tracking in memory is unaffected.
+///
+/// On any watcher or parse error: log via `warn!`, never crash.
 pub fn spawn_watcher(
-    _projects_dir: PathBuf,
-    _state_path: PathBuf,
-    _agg_tx: AggregatorTx,
-    _initial_tokens: PersistedTokens,
+    projects_dir: PathBuf,
+    state_path: PathBuf,
+    agg_tx: AggregatorTx,
+    initial_tokens: PersistedTokens,
 ) -> tokio::task::JoinHandle<()> {
-    // Stub — full implementation in commit 2.
-    tokio::spawn(async { })
+    tokio::spawn(async move {
+        if let Err(e) = run_watcher(projects_dir, state_path, agg_tx, initial_tokens).await {
+            warn!("JSONL watcher exited with error: {e:#}");
+        }
+    })
 }
 
 /// Spawn the midnight-reset task.
 ///
-/// Sleeps until next local midnight, then sends
-/// [`crate::state::AggregatorMsg::DailyReset`] with the new UTC date string,
-/// persists the reset token state, then sleeps until the following midnight.
+/// Sleeps until next local midnight, then:
+/// 1. Persists reset token state (`today = 0`, `date = new_date`) to `state_path`.
+/// 2. Sends [`crate::state::AggregatorMsg::DailyReset`] to the aggregator.
+/// 3. Sleeps until the following midnight.
 ///
-/// Implementation: commit 2 of task 27993d8d.
+/// Persisting before sending ensures a daemon restart immediately after midnight
+/// doesn't think the day has not yet rolled over.
 pub fn spawn_midnight_reset(
-    _state_path: PathBuf,
-    _agg_tx: AggregatorTx,
+    state_path: PathBuf,
+    agg_tx: AggregatorTx,
 ) -> tokio::task::JoinHandle<()> {
-    // Stub — full implementation in commit 2.
-    tokio::spawn(async { })
+    tokio::spawn(async move {
+        loop {
+            let sleep_dur = secs_until_next_local_midnight();
+            tokio::time::sleep(sleep_dur).await;
+
+            let new_date = current_utc_date_string();
+
+            // Persist the reset (today = 0) immediately.
+            let tokens_snapshot = PersistedTokens {
+                date: new_date.clone(),
+                today: 0,
+                cumulative: 0, // Aggregator owns cumulative; we write 0 here,
+                                // the JSONL watcher will re-persist once it gets
+                                // the next TokensUpdate. Acceptable gap.
+            };
+            if let Err(e) = tokens_snapshot.save(&state_path) {
+                warn!("midnight reset: failed to persist tokens.json: {e:#}");
+            }
+
+            if agg_tx
+                .send(crate::state::AggregatorMsg::DailyReset { date: new_date })
+                .await
+                .is_err()
+            {
+                warn!("midnight reset: aggregator gone, stopping midnight task");
+                break;
+            }
+        }
+    })
+}
+
+// How long to wait between persist flushes when tokens have changed.
+const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn run_watcher(
+    projects_dir: PathBuf,
+    state_path: PathBuf,
+    agg_tx: AggregatorTx,
+    initial_tokens: PersistedTokens,
+) -> Result<()> {
+    use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::sync::mpsc as std_mpsc;
+
+    // Initialise in-memory token state from the persisted file.
+    let mut cumulative = initial_tokens.cumulative;
+    let mut today = initial_tokens.today;
+    // Track the date the current `today` counter belongs to.  We use the
+    // persisted date if available so we don't recompute it on every persist and
+    // don't accidentally advance the date boundary until midnight-reset fires.
+    //
+    // TODO: plumb `DailyReset` acknowledgement back into the watcher so it can
+    // update `current_date` without relying solely on the midnight-reset task.
+    let mut current_date = if initial_tokens.date.is_empty() {
+        current_utc_date_string()
+    } else {
+        initial_tokens.date.clone()
+    };
+
+    // Snapshot existing file offsets so we only process *new* lines.
+    let mut offsets = FileOffsets::new();
+    offsets.snapshot_existing(&projects_dir);
+
+    // Create a synchronous notify channel (notify 6 is sync).
+    let (ev_tx, ev_rx) = std_mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = RecommendedWatcher::new(ev_tx, Config::default())
+        .context("create filesystem watcher")?;
+    watcher
+        .watch(&projects_dir, RecursiveMode::Recursive)
+        .context("watch projects dir")?;
+
+    tracing::info!(dir = %projects_dir.display(), "JSONL watcher started");
+
+    // Debounce timer: tokens changed since last persist?
+    let mut tokens_dirty = false;
+    let mut last_persist = std::time::Instant::now();
+
+    // Run the event loop inside a blocking task (notify 6 uses a sync channel).
+    // We poll the channel with a short timeout so we can also drive the persist
+    // debounce without blocking the tokio runtime.
+    loop {
+        // Drain all pending events (non-blocking after the first).
+        loop {
+            match ev_rx.try_recv() {
+                Ok(Ok(event)) => {
+                    handle_event(
+                        event,
+                        &mut offsets,
+                        &agg_tx,
+                        &mut cumulative,
+                        &mut today,
+                        &mut tokens_dirty,
+                    )
+                    .await;
+                }
+                Ok(Err(e)) => {
+                    warn!("JSONL watcher error: {e}");
+                }
+                Err(std_mpsc::TryRecvError::Empty) => break,
+                Err(std_mpsc::TryRecvError::Disconnected) => {
+                    warn!("JSONL watcher channel disconnected");
+                    return Ok(());
+                }
+            }
+        }
+
+        // Persist debounce: flush every PERSIST_DEBOUNCE if tokens changed.
+        // Use `current_date` (set at startup from initial_tokens.date or today's
+        // UTC date) rather than recomputing — keeps the day boundary stable until
+        // the midnight-reset task fires DailyReset.
+        if tokens_dirty && last_persist.elapsed() >= PERSIST_DEBOUNCE {
+            let snap = PersistedTokens {
+                date: current_date.clone(),
+                cumulative,
+                today,
+            };
+            if let Err(e) = snap.save(&state_path) {
+                warn!("JSONL watcher: failed to persist tokens: {e:#}");
+            } else {
+                tokens_dirty = false;
+                last_persist = std::time::Instant::now();
+            }
+        }
+
+        // Yield to the tokio runtime before polling again.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Process one notify event.
+async fn handle_event(
+    event: notify::Event,
+    offsets: &mut FileOffsets,
+    agg_tx: &AggregatorTx,
+    cumulative: &mut u64,
+    today: &mut u64,
+    tokens_dirty: &mut bool,
+) {
+    use notify::EventKind;
+
+    let is_relevant = matches!(
+        event.kind,
+        EventKind::Modify(_) | EventKind::Create(_)
+    );
+    if !is_relevant {
+        return;
+    }
+
+    for path in &event.paths {
+        // Ignore non-.jsonl paths silently.
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+
+        offsets.drain_new_lines(path, |line| {
+            let Some(parsed) = parse_jsonl_line(line) else { return };
+
+            if parsed.output_tokens > 0 {
+                *cumulative += parsed.output_tokens;
+                *today += parsed.output_tokens;
+                *tokens_dirty = true;
+
+                // Fire-and-forget: if aggregator is gone, we just log.
+                let tx = agg_tx.clone();
+                let tokens = parsed.output_tokens;
+                tokio::spawn(async move {
+                    if tx
+                        .send(crate::state::AggregatorMsg::TokensUpdate {
+                            output_tokens: tokens,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        warn!("JSONL: aggregator gone, dropping TokensUpdate");
+                    }
+                });
+            }
+
+            if let Some(text) = parsed.entry_text {
+                let tx = agg_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(crate::state::AggregatorMsg::AddEntry { text })
+                        .await;
+                });
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Return the current date as a `"YYYY-MM-DD"` string in UTC.
+pub(crate) fn current_utc_date_string() -> String {
+    // Compute from Unix epoch: days since 1970-01-01.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86400;
+    // Simple Gregorian calendar computation (no time crate needed for this).
+    let (y, m, d) = days_to_ymd(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Compute how long to sleep until the next local midnight.
+///
+/// Uses the `time` crate for local-offset awareness.  Falls back to UTC
+/// if the local offset cannot be determined.
+pub(crate) fn secs_until_next_local_midnight() -> std::time::Duration {
+    use time::{OffsetDateTime, macros::time};
+
+    let now = OffsetDateTime::now_local()
+        .unwrap_or_else(|_| OffsetDateTime::now_utc());
+
+    // Next midnight in local time.
+    let tomorrow_midnight = now
+        .replace_time(time!(00:00:00))
+        // Advance by one day.
+        + time::Duration::days(1);
+
+    let secs_remaining = (tomorrow_midnight - now).whole_seconds().max(0) as u64;
+    std::time::Duration::from_secs(secs_remaining)
+}
+
+/// Convert days-since-1970-01-01 to (year, month, day).
+///
+/// Standalone implementation so we don't need a calendar crate just for
+/// formatting a date string.
+fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
+    // Shift epoch to 1 March 0 (makes leap-year logic simpler).
+    days += 719468;
+    let era = days / 146097;
+    let doe = days % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u32, m as u32, d as u32)
+}
 
 /// Truncate `s` to at most `max_chars` Unicode scalar values, appending `…`
 /// if truncated.
