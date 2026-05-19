@@ -55,7 +55,10 @@ fn write_and_load_config(dir: &TempDir, timeout_ms: u64) -> ccbridged::config::C
 async fn config_timeout_ms_wires_through_to_approval_flow() {
     let dir = TempDir::new().unwrap();
     let config = write_and_load_config(&dir, 100);
-    assert_eq!(config.approvals.timeout_ms, 100, "config must reflect written value");
+    assert_eq!(
+        config.approvals.timeout_ms, 100,
+        "config must reflect written value"
+    );
 
     let runtime_dir = dir.path().to_path_buf();
     std::fs::create_dir_all(runtime_dir.join("ccbridge")).unwrap();
@@ -73,7 +76,9 @@ async fn config_timeout_ms_wires_through_to_approval_flow() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let sock = runtime_dir.join("ccbridge").join("hooks.sock");
-    let stream = UnixStream::connect(&sock).await.expect("connect hooks.sock");
+    let stream = UnixStream::connect(&sock)
+        .await
+        .expect("connect hooks.sock");
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
 
@@ -107,8 +112,7 @@ async fn config_timeout_ms_wires_through_to_approval_flow() {
     // The response should be the timeout fallback (default = Passthrough → Ask).
     let v: serde_json::Value = serde_json::from_str(line.trim()).expect("valid JSON");
     assert_eq!(
-        v["hookSpecificOutput"]["permissionDecision"],
-        "ask",
+        v["hookSpecificOutput"]["permissionDecision"], "ask",
         "default fallback on timeout must be 'ask'"
     );
 

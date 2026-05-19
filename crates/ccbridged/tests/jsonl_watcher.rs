@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 
 use ccbridged::ingest::jsonl::{spawn_watcher, PersistedTokens};
-use ccbridged::state::{AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator};
+use ccbridged::state::{spawn as spawn_aggregator, AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,10 +50,7 @@ fn user_line() -> String {
 
 /// Drain `TokensUpdate` messages from `agg_tx` by polling `GetHeartbeat`
 /// until `heartbeat.tokens >= expected_cumulative` or we time out.
-async fn wait_for_tokens(
-    agg_tx: &ccbridged::state::AggregatorTx,
-    expected_cumulative: u64,
-) -> u64 {
+async fn wait_for_tokens(agg_tx: &ccbridged::state::AggregatorTx, expected_cumulative: u64) -> u64 {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -83,7 +80,13 @@ async fn watcher_picks_up_new_lines() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, ccbridged::config::Fallback::default(), std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
+    let (agg_tx, _hb_rx) = spawn_aggregator(
+        DEFAULT_APPROVAL_TIMEOUT,
+        ccbridged::config::Fallback::default(),
+        std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            ccbridged::permission::Allowlist::empty(),
+        ))),
+    );
 
     // Start watcher (snapshots existing files — dir is empty, offset = 0).
     spawn_watcher(
@@ -116,7 +119,13 @@ async fn watcher_ignores_non_assistant_lines() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, ccbridged::config::Fallback::default(), std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
+    let (agg_tx, _hb_rx) = spawn_aggregator(
+        DEFAULT_APPROVAL_TIMEOUT,
+        ccbridged::config::Fallback::default(),
+        std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            ccbridged::permission::Allowlist::empty(),
+        ))),
+    );
     spawn_watcher(
         projects_dir.clone(),
         state_path,
@@ -128,9 +137,9 @@ async fn watcher_ignores_non_assistant_lines() {
     let jsonl_path = projects_dir.join("session_mixed.jsonl");
     {
         let mut f = std::fs::File::create(&jsonl_path).unwrap();
-        write!(f, "{}", user_line()).unwrap();           // 0 tokens
-        write!(f, "{}", assistant_line(100)).unwrap();  // 100 tokens
-        write!(f, "{}", user_line()).unwrap();           // 0 tokens
+        write!(f, "{}", user_line()).unwrap(); // 0 tokens
+        write!(f, "{}", assistant_line(100)).unwrap(); // 100 tokens
+        write!(f, "{}", user_line()).unwrap(); // 0 tokens
     }
 
     let total = wait_for_tokens(&agg_tx, 100).await;
@@ -144,7 +153,13 @@ async fn watcher_tolerates_malformed_lines() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, ccbridged::config::Fallback::default(), std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
+    let (agg_tx, _hb_rx) = spawn_aggregator(
+        DEFAULT_APPROVAL_TIMEOUT,
+        ccbridged::config::Fallback::default(),
+        std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            ccbridged::permission::Allowlist::empty(),
+        ))),
+    );
     spawn_watcher(
         projects_dir.clone(),
         state_path,
@@ -173,7 +188,13 @@ async fn watcher_ignores_non_jsonl_files() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, ccbridged::config::Fallback::default(), std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
+    let (agg_tx, _hb_rx) = spawn_aggregator(
+        DEFAULT_APPROVAL_TIMEOUT,
+        ccbridged::config::Fallback::default(),
+        std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            ccbridged::permission::Allowlist::empty(),
+        ))),
+    );
     spawn_watcher(
         projects_dir.clone(),
         state_path,
@@ -202,7 +223,13 @@ async fn watcher_loads_initial_token_state() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, ccbridged::config::Fallback::default(), std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
+    let (agg_tx, _hb_rx) = spawn_aggregator(
+        DEFAULT_APPROVAL_TIMEOUT,
+        ccbridged::config::Fallback::default(),
+        std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            ccbridged::permission::Allowlist::empty(),
+        ))),
+    );
 
     // Simulate a prior daemon run with 10_000 cumulative tokens.
     let initial = PersistedTokens {
@@ -213,7 +240,9 @@ async fn watcher_loads_initial_token_state() {
 
     // Pre-seed the aggregator with the loaded tokens before starting the watcher.
     agg_tx
-        .send(AggregatorMsg::TokensUpdate { output_tokens: 10_000 })
+        .send(AggregatorMsg::TokensUpdate {
+            output_tokens: 10_000,
+        })
         .await
         .unwrap();
 

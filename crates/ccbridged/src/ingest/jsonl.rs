@@ -76,8 +76,7 @@ impl PersistedTokens {
         }
         let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp, &bytes)
-            .with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
         std::fs::rename(&tmp, path)
             .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())
@@ -173,7 +172,10 @@ pub fn parse_jsonl_line(line: &str) -> Option<ParsedAssistantLine> {
             })
         });
 
-    Some(ParsedAssistantLine { output_tokens, entry_text })
+    Some(ParsedAssistantLine {
+        output_tokens,
+        entry_text,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +195,9 @@ impl Default for FileOffsets {
 
 impl FileOffsets {
     pub fn new() -> Self {
-        Self { inner: HashMap::new() }
+        Self {
+            inner: HashMap::new(),
+        }
     }
 
     /// Scan `projects_dir` recursively, record the current end-of-file offset
@@ -310,8 +314,8 @@ pub fn spawn_midnight_reset(
                 date: new_date.clone(),
                 today: 0,
                 cumulative: 0, // Aggregator owns cumulative; we write 0 here,
-                                // the JSONL watcher will re-persist once it gets
-                                // the next TokensUpdate. Acceptable gap.
+                               // the JSONL watcher will re-persist once it gets
+                               // the next TokensUpdate. Acceptable gap.
             };
             if let Err(e) = tokens_snapshot.save(&state_path) {
                 warn!("midnight reset: failed to persist tokens.json: {e:#}");
@@ -362,8 +366,8 @@ async fn run_watcher(
 
     // Create a synchronous notify channel (notify 6 is sync).
     let (ev_tx, ev_rx) = std_mpsc::channel::<notify::Result<Event>>();
-    let mut watcher = RecommendedWatcher::new(ev_tx, Config::default())
-        .context("create filesystem watcher")?;
+    let mut watcher =
+        RecommendedWatcher::new(ev_tx, Config::default()).context("create filesystem watcher")?;
     watcher
         .watch(&projects_dir, RecursiveMode::Recursive)
         .context("watch projects dir")?;
@@ -437,10 +441,7 @@ async fn handle_event(
 ) {
     use notify::EventKind;
 
-    let is_relevant = matches!(
-        event.kind,
-        EventKind::Modify(_) | EventKind::Create(_)
-    );
+    let is_relevant = matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
     if !is_relevant {
         return;
     }
@@ -452,7 +453,9 @@ async fn handle_event(
         }
 
         offsets.drain_new_lines(path, |line| {
-            let Some(parsed) = parse_jsonl_line(line) else { return };
+            let Some(parsed) = parse_jsonl_line(line) else {
+                return;
+            };
 
             if parsed.output_tokens > 0 {
                 *cumulative += parsed.output_tokens;
@@ -509,10 +512,9 @@ pub(crate) fn current_utc_date_string() -> String {
 /// Uses the `time` crate for local-offset awareness.  Falls back to UTC
 /// if the local offset cannot be determined.
 pub(crate) fn secs_until_next_local_midnight() -> std::time::Duration {
-    use time::{OffsetDateTime, macros::time};
+    use time::{macros::time, OffsetDateTime};
 
-    let now = OffsetDateTime::now_local()
-        .unwrap_or_else(|_| OffsetDateTime::now_utc());
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
 
     // Next midnight in local time.
     let tomorrow_midnight = now
@@ -614,7 +616,8 @@ mod tests {
                     {"type": "text", "text": "Here is my analysis of the situation."}
                 ]
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let parsed = parse_jsonl_line(&line).expect("should parse");
         assert_eq!(parsed.output_tokens, 200);
@@ -633,7 +636,8 @@ mod tests {
                 "role": "assistant",
                 "content": [{"type": "thinking", "thinking": "..."}]
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let parsed = parse_jsonl_line(&line).expect("should parse as assistant");
         assert_eq!(parsed.output_tokens, 0);
@@ -645,13 +649,15 @@ mod tests {
         let user_line = serde_json::to_string(&json!({
             "type": "user",
             "message": {"role": "user", "content": "hello"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(parse_jsonl_line(&user_line).is_none());
 
         let system_line = serde_json::to_string(&json!({
             "type": "permission-mode",
             "permissionMode": "default"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(parse_jsonl_line(&system_line).is_none());
     }
 
@@ -681,7 +687,8 @@ mod tests {
                 "usage": {"output_tokens": 50},
                 "content": [{"type": "text", "text": long_text}]
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let parsed = parse_jsonl_line(&line).unwrap();
         let snippet = parsed.entry_text.unwrap();
@@ -703,7 +710,8 @@ mod tests {
                 "usage": {"output_tokens": 1},
                 "content": [{"type": "text", "text": em_dashes}]
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let parsed = parse_jsonl_line(&line).unwrap();
         let snippet = parsed.entry_text.unwrap();
@@ -722,7 +730,8 @@ mod tests {
                 "usage": {"output_tokens": 5},
                 "content": [{"type": "text", "text": text}]
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let parsed = parse_jsonl_line(&line).unwrap();
         assert_eq!(parsed.entry_text.as_deref(), Some("short text"));
     }
@@ -739,7 +748,8 @@ mod tests {
                     {"type": "text", "text": "second text block"}
                 ]
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let parsed = parse_jsonl_line(&line).unwrap();
         assert_eq!(parsed.entry_text.as_deref(), Some("first text block"));
@@ -782,7 +792,11 @@ mod tests {
     fn persisted_tokens_save_creates_parent_dirs() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("a").join("b").join("c").join("tokens.json");
-        let tokens = PersistedTokens { date: "2026-05-20".to_owned(), today: 1, cumulative: 2 };
+        let tokens = PersistedTokens {
+            date: "2026-05-20".to_owned(),
+            today: 1,
+            cumulative: 2,
+        };
         tokens.save(&path).unwrap();
         assert!(path.exists());
     }
@@ -805,7 +819,10 @@ mod tests {
 
         // Append a new line.
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(f, "line3").unwrap();
 
         let mut collected = Vec::new();
@@ -832,7 +849,10 @@ mod tests {
 
         // Append a real third line (with newline this time).
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         // Complete the previous line + add a new one.
         write!(f, "\nline3\n").unwrap();
 

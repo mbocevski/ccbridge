@@ -8,9 +8,9 @@
 pub mod emit;
 pub mod ingest;
 pub mod permission;
-pub mod state;
 #[doc(hidden)]
 pub mod setup;
+pub mod state;
 
 // Config module — public so tests and main.rs can reach it.
 pub mod config;

@@ -104,7 +104,9 @@ pub fn derive_pattern(event: &PreToolUseEvent) -> DerivedPattern {
             if let Some(cmd) = event.tool_input.get("command").and_then(|v| v.as_str()) {
                 DerivedPattern::Specific(format!("Bash({cmd})"))
             } else {
-                DerivedPattern::BareToolNeedsConfirmation { tool: tool.to_owned() }
+                DerivedPattern::BareToolNeedsConfirmation {
+                    tool: tool.to_owned(),
+                }
             }
         }
 
@@ -113,15 +115,23 @@ pub fn derive_pattern(event: &PreToolUseEvent) -> DerivedPattern {
             if let Some(path) = event.tool_input.get("file_path").and_then(|v| v.as_str()) {
                 DerivedPattern::Specific(format!("{tool}({path})"))
             } else {
-                DerivedPattern::BareToolNeedsConfirmation { tool: tool.to_owned() }
+                DerivedPattern::BareToolNeedsConfirmation {
+                    tool: tool.to_owned(),
+                }
             }
         }
 
         "Agent" => {
-            if let Some(t) = event.tool_input.get("subagent_type").and_then(|v| v.as_str()) {
+            if let Some(t) = event
+                .tool_input
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+            {
                 DerivedPattern::Specific(format!("Agent({t})"))
             } else {
-                DerivedPattern::BareToolNeedsConfirmation { tool: tool.to_owned() }
+                DerivedPattern::BareToolNeedsConfirmation {
+                    tool: tool.to_owned(),
+                }
             }
         }
 
@@ -130,7 +140,9 @@ pub fn derive_pattern(event: &PreToolUseEvent) -> DerivedPattern {
         // the matcher wouldn't recognize as Confident would violate the
         // round-trip invariant, so we fall to BareToolNeedsConfirmation.
         // This is a known limitation; improve the matcher in a follow-up task.
-        _ => DerivedPattern::BareToolNeedsConfirmation { tool: tool.to_owned() },
+        _ => DerivedPattern::BareToolNeedsConfirmation {
+            tool: tool.to_owned(),
+        },
     }
 }
 
@@ -155,8 +167,7 @@ pub fn write_allow_pattern(
     let settings_path = match target {
         WriteTarget::ProjectLocal { root } => {
             let dir = root.join(".claude");
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("mkdir -p {}", dir.display()))?;
+            std::fs::create_dir_all(&dir).with_context(|| format!("mkdir -p {}", dir.display()))?;
             dir.join("settings.local.json")
         }
         WriteTarget::UserGlobal => crate::permission::settings_path(),
@@ -184,7 +195,10 @@ pub fn write_allow_pattern(
 
     // Idempotency check.
     if arr.iter().any(|v| v.as_str() == Some(pattern)) {
-        tracing::debug!("pattern {:?} already present in allow list; skipping write", pattern);
+        tracing::debug!(
+            "pattern {:?} already present in allow list; skipping write",
+            pattern
+        );
         return Ok(());
     }
 
@@ -222,17 +236,17 @@ pub fn write_allow_pattern(
 pub fn undo_last_allow(audit_log_path: &Path) -> Result<()> {
     let entry = find_last_undone_addition(audit_log_path)
         .context("reading audit log")?
-        .ok_or_else(|| anyhow::anyhow!(
-            "no allowlist additions in audit log to undo ({})",
-            audit_log_path.display()
-        ))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no allowlist additions in audit log to undo ({})",
+                audit_log_path.display()
+            )
+        })?;
 
     // Resolve path from the target stored in the audit log.
     let settings_path = match &entry.target {
-        WriteTarget::ProjectLocal { root } =>
-            root.join(".claude").join("settings.local.json"),
-        WriteTarget::UserGlobal =>
-            crate::permission::settings_path(),
+        WriteTarget::ProjectLocal { root } => root.join(".claude").join("settings.local.json"),
+        WriteTarget::UserGlobal => crate::permission::settings_path(),
     };
 
     let mut settings = load_settings(&settings_path)
@@ -387,7 +401,10 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
             }
             "added" if !undone_keys.contains(&key) => {
                 let session_short = cols.get(4).copied().unwrap_or("");
-                let agent = cols.get(5).copied().filter(|s| !s.is_empty())
+                let agent = cols
+                    .get(5)
+                    .copied()
+                    .filter(|s| !s.is_empty())
                     .map(str::to_owned);
 
                 // Parse target column (col 6); missing/unknown → UserGlobal.
@@ -484,25 +501,40 @@ mod tests {
     #[test]
     fn derive_pattern_bash_literal_command() {
         let e = event("Bash", json!({"command": "rm -rf /tmp/foo"}));
-        assert_eq!(derive_pattern(&e), DerivedPattern::Specific("Bash(rm -rf /tmp/foo)".to_owned()));
+        assert_eq!(
+            derive_pattern(&e),
+            DerivedPattern::Specific("Bash(rm -rf /tmp/foo)".to_owned())
+        );
     }
 
     #[test]
     fn derive_pattern_read_exact_path() {
         let e = event("Read", json!({"file_path": "/home/user/.env"}));
-        assert_eq!(derive_pattern(&e), DerivedPattern::Specific("Read(/home/user/.env)".to_owned()));
+        assert_eq!(
+            derive_pattern(&e),
+            DerivedPattern::Specific("Read(/home/user/.env)".to_owned())
+        );
     }
 
     #[test]
     fn derive_pattern_edit_exact_path() {
-        let e = event("Edit", json!({"file_path": "/tmp/foo.rs", "old_string": "a", "new_string": "b"}));
-        assert_eq!(derive_pattern(&e), DerivedPattern::Specific("Edit(/tmp/foo.rs)".to_owned()));
+        let e = event(
+            "Edit",
+            json!({"file_path": "/tmp/foo.rs", "old_string": "a", "new_string": "b"}),
+        );
+        assert_eq!(
+            derive_pattern(&e),
+            DerivedPattern::Specific("Edit(/tmp/foo.rs)".to_owned())
+        );
     }
 
     #[test]
     fn derive_pattern_agent_subagent_type() {
         let e = event("Agent", json!({"subagent_type": "task-planner"}));
-        assert_eq!(derive_pattern(&e), DerivedPattern::Specific("Agent(task-planner)".to_owned()));
+        assert_eq!(
+            derive_pattern(&e),
+            DerivedPattern::Specific("Agent(task-planner)".to_owned())
+        );
     }
 
     #[test]
@@ -520,7 +552,9 @@ mod tests {
         let e = event("WebSearch", json!({"query": "Rust tokio tutorial"}));
         assert_eq!(
             derive_pattern(&e),
-            DerivedPattern::BareToolNeedsConfirmation { tool: "WebSearch".to_owned() }
+            DerivedPattern::BareToolNeedsConfirmation {
+                tool: "WebSearch".to_owned()
+            }
         );
     }
 
@@ -529,7 +563,9 @@ mod tests {
         let e = event("Bash", json!({"description": "no command field"}));
         assert_eq!(
             derive_pattern(&e),
-            DerivedPattern::BareToolNeedsConfirmation { tool: "Bash".to_owned() }
+            DerivedPattern::BareToolNeedsConfirmation {
+                tool: "Bash".to_owned()
+            }
         );
     }
 
@@ -540,7 +576,9 @@ mod tests {
         let e = event("Glob", json!({"pattern": "*.rs"}));
         assert_eq!(
             derive_pattern(&e),
-            DerivedPattern::BareToolNeedsConfirmation { tool: "Glob".to_owned() }
+            DerivedPattern::BareToolNeedsConfirmation {
+                tool: "Glob".to_owned()
+            }
         );
     }
 
@@ -550,7 +588,9 @@ mod tests {
         let e = event("Read", json!({"file_path": 42}));
         assert_eq!(
             derive_pattern(&e),
-            DerivedPattern::BareToolNeedsConfirmation { tool: "Read".to_owned() }
+            DerivedPattern::BareToolNeedsConfirmation {
+                tool: "Read".to_owned()
+            }
         );
     }
 
@@ -582,12 +622,20 @@ mod tests {
 
     #[test]
     fn round_trip_read_path() {
-        assert_round_trip("Read", json!({"file_path": "/tmp/file.txt"}), "Read(/tmp/file.txt)");
+        assert_round_trip(
+            "Read",
+            json!({"file_path": "/tmp/file.txt"}),
+            "Read(/tmp/file.txt)",
+        );
     }
 
     #[test]
     fn round_trip_agent_subagent() {
-        assert_round_trip("Agent", json!({"subagent_type": "task-planner"}), "Agent(task-planner)");
+        assert_round_trip(
+            "Agent",
+            json!({"subagent_type": "task-planner"}),
+            "Agent(task-planner)",
+        );
     }
 
     #[test]
@@ -613,7 +661,9 @@ mod tests {
         // Use UserGlobal target pointing at our temp settings file.
         // (We can't use WriteTarget::UserGlobal directly since it resolves
         // to ~/.claude/settings.json, so we test via ProjectLocal.)
-        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        let target = WriteTarget::ProjectLocal {
+            root: dir.path().to_path_buf(),
+        };
         write_allow_pattern(&target, "Bash(git status)", &audit, meta()).unwrap();
 
         let loaded_path = dir.path().join(".claude").join("settings.local.json");
@@ -627,7 +677,9 @@ mod tests {
     fn write_allow_pattern_idempotent() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        let target = WriteTarget::ProjectLocal {
+            root: dir.path().to_path_buf(),
+        };
 
         write_allow_pattern(&target, "Bash(echo hi)", &audit, meta()).unwrap();
         write_allow_pattern(&target, "Bash(echo hi)", &audit, meta()).unwrap();
@@ -642,13 +694,18 @@ mod tests {
     fn write_allow_pattern_writes_audit_log() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        let target = WriteTarget::ProjectLocal {
+            root: dir.path().to_path_buf(),
+        };
 
         write_allow_pattern(&target, "Read(/tmp/file.txt)", &audit, meta()).unwrap();
 
         let log = std::fs::read_to_string(&audit).unwrap();
         assert!(log.contains("added"), "audit log must contain 'added' op");
-        assert!(log.contains("Read(/tmp/file.txt)"), "audit log must contain the pattern");
+        assert!(
+            log.contains("Read(/tmp/file.txt)"),
+            "audit log must contain the pattern"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -659,25 +716,34 @@ mod tests {
     fn undo_last_allow_removes_pattern() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        let target = WriteTarget::ProjectLocal {
+            root: dir.path().to_path_buf(),
+        };
 
         write_allow_pattern(&target, "Bash(echo undo_me)", &audit, meta()).unwrap();
 
         let loaded_path = dir.path().join(".claude").join("settings.local.json");
         assert_eq!(
-            crate::setup::load_settings(&loaded_path).unwrap()
-                ["permissions"]["allow"].as_array().unwrap().len(),
+            crate::setup::load_settings(&loaded_path).unwrap()["permissions"]["allow"]
+                .as_array()
+                .unwrap()
+                .len(),
             1
         );
 
         undo_last_allow(&audit).unwrap();
 
-        let allow = crate::setup::load_settings(&loaded_path).unwrap()
-            ["permissions"]["allow"].as_array().unwrap().to_owned();
+        let allow = crate::setup::load_settings(&loaded_path).unwrap()["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .to_owned();
         assert!(allow.is_empty(), "pattern must be removed after undo");
 
         let log = std::fs::read_to_string(&audit).unwrap();
-        assert!(log.contains("undone"), "audit log must contain 'undone' after undo");
+        assert!(
+            log.contains("undone"),
+            "audit log must contain 'undone' after undo"
+        );
     }
 
     #[test]
@@ -696,7 +762,9 @@ mod tests {
     fn undo_last_allow_idempotent_when_pattern_already_gone() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        let target = WriteTarget::ProjectLocal {
+            root: dir.path().to_path_buf(),
+        };
 
         write_allow_pattern(&target, "Bash(already_gone)", &audit, meta()).unwrap();
 
@@ -718,7 +786,9 @@ mod tests {
         // No .claude/ dir yet.
         assert!(!dir.path().join(".claude").exists());
 
-        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        let target = WriteTarget::ProjectLocal {
+            root: dir.path().to_path_buf(),
+        };
         write_allow_pattern(&target, "Bash(npm test)", &audit, meta()).unwrap();
 
         let local = dir.path().join(".claude").join("settings.local.json");
@@ -734,7 +804,9 @@ mod tests {
     fn write_allow_pattern_project_local_records_target_in_audit() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        let target = WriteTarget::ProjectLocal {
+            root: dir.path().to_path_buf(),
+        };
 
         write_allow_pattern(&target, "Skill", &audit, meta()).unwrap();
 
@@ -756,34 +828,54 @@ mod tests {
         let audit = dir.path().join("audit.log");
         let metadata = meta();
 
-        append_audit_entry(&audit, "added", "Skill", &metadata, &WriteTarget::UserGlobal).unwrap();
+        append_audit_entry(
+            &audit,
+            "added",
+            "Skill",
+            &metadata,
+            &WriteTarget::UserGlobal,
+        )
+        .unwrap();
 
         let log = std::fs::read_to_string(&audit).unwrap();
         let cols: Vec<&str> = log.trim_end_matches('\n').split('\t').collect();
-        assert_eq!(cols.get(6).copied(), Some("user"), "7th column must be 'user'");
+        assert_eq!(
+            cols.get(6).copied(),
+            Some("user"),
+            "7th column must be 'user'"
+        );
     }
 
     #[test]
     fn undo_last_allow_target_aware_project_local() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal { root: dir.path().to_path_buf() };
+        let target = WriteTarget::ProjectLocal {
+            root: dir.path().to_path_buf(),
+        };
 
         write_allow_pattern(&target, "Bash(npm test)", &audit, meta()).unwrap();
 
         let local = dir.path().join(".claude").join("settings.local.json");
         assert_eq!(
-            crate::setup::load_settings(&local).unwrap()
-                ["permissions"]["allow"].as_array().unwrap().len(),
+            crate::setup::load_settings(&local).unwrap()["permissions"]["allow"]
+                .as_array()
+                .unwrap()
+                .len(),
             1,
             "pattern must be in project-local file"
         );
 
         undo_last_allow(&audit).unwrap();
 
-        let allow = crate::setup::load_settings(&local).unwrap()
-            ["permissions"]["allow"].as_array().unwrap().to_owned();
-        assert!(allow.is_empty(), "pattern must be removed from project-local file");
+        let allow = crate::setup::load_settings(&local).unwrap()["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .to_owned();
+        assert!(
+            allow.is_empty(),
+            "pattern must be removed from project-local file"
+        );
     }
 
     #[test]
@@ -804,9 +896,8 @@ mod tests {
     #[test]
     fn resolve_write_target_returns_user_global_for_unrooted_cwd() {
         // No .claude/ or .git anywhere in the path → UserGlobal fallback.
-        let target = resolve_write_target(std::path::Path::new(
-            "/nonexistent-ccbridge-test-xyz/sub",
-        ));
+        let target =
+            resolve_write_target(std::path::Path::new("/nonexistent-ccbridge-test-xyz/sub"));
         assert!(matches!(target, WriteTarget::UserGlobal));
     }
 }

@@ -471,9 +471,8 @@ mod tests {
             "hook_event_name": "Stop"
             // response intentionally absent
         });
-        let evt: HookEvent = serde_json::from_value(raw).expect(
-            "Stop without response must parse successfully",
-        );
+        let evt: HookEvent =
+            serde_json::from_value(raw).expect("Stop without response must parse successfully");
         match &evt {
             HookEvent::Stop(e) => {
                 assert!(e.response.is_none(), "absent response must be None");
@@ -575,12 +574,14 @@ mod tests {
             "tool_use_id": "toolu_err_01"
             // tool_result intentionally absent
         });
-        let evt: HookEvent = serde_json::from_value(raw).expect(
-            "PostToolUse without tool_result must parse successfully",
-        );
+        let evt: HookEvent = serde_json::from_value(raw)
+            .expect("PostToolUse without tool_result must parse successfully");
         match &evt {
             HookEvent::PostToolUse(e) => {
-                assert!(e.tool_result.is_none(), "tool_result should be None when absent");
+                assert!(
+                    e.tool_result.is_none(),
+                    "tool_result should be None when absent"
+                );
                 assert_eq!(e.tool_name, "Bash");
             }
             _ => panic!("wrong variant"),

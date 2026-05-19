@@ -203,8 +203,13 @@ mod tests {
         let claude_dir = dir.path().join(".claude");
         std::fs::create_dir(&claude_dir).unwrap();
 
-        write_settings(&claude_dir, "settings.json",      &[], &["Bash(rm:*)"]);
-        write_settings(&claude_dir, "settings.local.json", &["Bash(echo test)"], &[]);
+        write_settings(&claude_dir, "settings.json", &[], &["Bash(rm:*)"]);
+        write_settings(
+            &claude_dir,
+            "settings.local.json",
+            &["Bash(echo test)"],
+            &[],
+        );
 
         let user = user_with_allow(&["Skill"]);
         let cache = ProjectAllowlistCache::new(user);
@@ -212,11 +217,17 @@ mod tests {
         let cascade = cache.cascade_for(dir.path());
 
         let allow_raws: Vec<&str> = cascade.allow.iter().map(|p| p.raw()).collect();
-        let deny_raws: Vec<&str>  = cascade.deny.iter().map(|p| p.raw()).collect();
+        let deny_raws: Vec<&str> = cascade.deny.iter().map(|p| p.raw()).collect();
 
-        assert!(allow_raws.contains(&"Bash(echo test)"), "local allow must be present");
-        assert!(allow_raws.contains(&"Skill"),            "user allow must be present");
-        assert!(deny_raws.contains(&"Bash(rm:*)"),        "project deny must be present");
+        assert!(
+            allow_raws.contains(&"Bash(echo test)"),
+            "local allow must be present"
+        );
+        assert!(allow_raws.contains(&"Skill"), "user allow must be present");
+        assert!(
+            deny_raws.contains(&"Bash(rm:*)"),
+            "project deny must be present"
+        );
     }
 
     #[tokio::test]
@@ -234,8 +245,11 @@ mod tests {
         let cascade = cache.cascade_for(dir.path());
 
         let allow_raws: Vec<&str> = cascade.allow.iter().map(|p| p.raw()).collect();
-        assert!(allow_raws.contains(&"Bash(echo hi)"), "local allow must be present");
-        assert!(allow_raws.contains(&"Skill"),          "user allow must be present");
+        assert!(
+            allow_raws.contains(&"Bash(echo hi)"),
+            "local allow must be present"
+        );
+        assert!(allow_raws.contains(&"Skill"), "user allow must be present");
     }
 
     #[tokio::test]

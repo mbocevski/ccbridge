@@ -77,7 +77,6 @@ pub struct PromptInfo {
     // `permission::Decision::AskAnnotated` (i.e. the allowlist matched
     // ambiguously).  Clients that don't know these fields ignore them.
     // No `hello.version` bump — this is an additive extension.
-
     /// The raw pattern string from `settings.json` that matched ambiguously
     /// (e.g. `"Bash(git status:*)"` or `"Read(**/.env*)"`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,7 +89,6 @@ pub struct PromptInfo {
     // Session/agent context — additive, no version bump.
     // Helps disambiguate prompts when multiple Claude Code sessions run
     // in parallel (agent teams, multiple terminal windows, etc.).
-
     /// The full `session_id` UUID from the hook event.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -233,10 +231,7 @@ pub enum WireDecision {
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum DeviceCommand {
     /// `{"cmd":"permission","id":"…","decision":"once"|"deny"}`
-    Permission {
-        id: String,
-        decision: WireDecision,
-    },
+    Permission { id: String, decision: WireDecision },
     /// `{"cmd":"status"}` — polls the daemon for a [`StatusAck`].
     Status,
     /// `{"cmd":"name","name":"Clawd"}` — sets the device's own display name.
@@ -459,8 +454,14 @@ mod tests {
             agent_type: None,
         };
         let v = serde_json::to_value(&prompt).unwrap();
-        assert!(v.get("matched_pattern").is_none(), "matched_pattern must be absent");
-        assert!(v.get("matched_source").is_none(), "matched_source must be absent");
+        assert!(
+            v.get("matched_pattern").is_none(),
+            "matched_pattern must be absent"
+        );
+        assert!(
+            v.get("matched_source").is_none(),
+            "matched_source must be absent"
+        );
     }
 
     #[test]
@@ -481,7 +482,10 @@ mod tests {
         assert_eq!(v["agent_type"], "general-purpose");
 
         let p2: PromptInfo = serde_json::from_value(v).unwrap();
-        assert_eq!(p2.session_id.as_deref(), Some("3cb58992-935c-4fdd-9efd-1f160946e822"));
+        assert_eq!(
+            p2.session_id.as_deref(),
+            Some("3cb58992-935c-4fdd-9efd-1f160946e822")
+        );
         assert_eq!(p2.cwd.as_deref(), Some("/home/user/dev/ccbridge"));
         assert_eq!(p2.agent_type.as_deref(), Some("general-purpose"));
     }
@@ -499,9 +503,15 @@ mod tests {
             agent_type: None,
         };
         let v = serde_json::to_value(&prompt).unwrap();
-        assert!(v.get("session_id").is_none(), "session_id must be absent when None");
+        assert!(
+            v.get("session_id").is_none(),
+            "session_id must be absent when None"
+        );
         assert!(v.get("cwd").is_none(), "cwd must be absent when None");
-        assert!(v.get("agent_type").is_none(), "agent_type must be absent when None");
+        assert!(
+            v.get("agent_type").is_none(),
+            "agent_type must be absent when None"
+        );
     }
 
     #[test]
@@ -539,7 +549,8 @@ mod tests {
 
     #[test]
     fn turn_event_round_trip() {
-        let raw = json!({"evt":"turn","role":"assistant","content":[{"type":"text","text":"Hello"}]});
+        let raw =
+            json!({"evt":"turn","role":"assistant","content":[{"type":"text","text":"Hello"}]});
         let evt: TurnEvent = serde_json::from_value(raw).unwrap();
         assert_eq!(evt.evt, "turn");
         let v = serde_json::to_value(&evt).unwrap();
@@ -549,7 +560,9 @@ mod tests {
 
     #[test]
     fn time_sync_round_trip() {
-        let ts = TimeSync { time: (1_775_731_234, -25200) };
+        let ts = TimeSync {
+            time: (1_775_731_234, -25200),
+        };
         let v = serde_json::to_value(&ts).unwrap();
         assert_eq!(v["time"][0], 1_775_731_234_i64);
         assert_eq!(v["time"][1], -25200);

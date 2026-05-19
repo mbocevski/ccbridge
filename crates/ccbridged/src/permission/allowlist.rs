@@ -82,8 +82,8 @@ impl Allowlist {
         if !path.exists() {
             return Ok(Self::empty());
         }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let root: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("parse JSON in {}", path.display()))?;
         Ok(Self::from_settings_json(&root))
@@ -257,24 +257,36 @@ mod tests {
         let merged = Allowlist::cascade(&local, &project, &user);
 
         let deny_raws = raw_strs(&merged.deny);
-        assert!(deny_raws.contains(&"Skill"),            "local deny must be present");
-        assert!(deny_raws.contains(&"Bash(npm test)"),   "project deny must be present");
-        assert!(deny_raws.contains(&"Read(**/.env*)"),   "user deny must be present");
+        assert!(deny_raws.contains(&"Skill"), "local deny must be present");
+        assert!(
+            deny_raws.contains(&"Bash(npm test)"),
+            "project deny must be present"
+        );
+        assert!(
+            deny_raws.contains(&"Read(**/.env*)"),
+            "user deny must be present"
+        );
         assert_eq!(merged.deny.len(), 3);
     }
 
     #[test]
     fn cascade_allow_union() {
         let local = allowlist_with_patterns(&["Agent(task-planner)"], &[]);
-        let project = allowlist_with_patterns(&["Bash(npm test)"],    &[]);
-        let user = allowlist_with_patterns(&["Skill"],                &[]);
+        let project = allowlist_with_patterns(&["Bash(npm test)"], &[]);
+        let user = allowlist_with_patterns(&["Skill"], &[]);
 
         let merged = Allowlist::cascade(&local, &project, &user);
 
         let allow_raws = raw_strs(&merged.allow);
-        assert!(allow_raws.contains(&"Agent(task-planner)"), "local allow must be present");
-        assert!(allow_raws.contains(&"Bash(npm test)"),      "project allow must be present");
-        assert!(allow_raws.contains(&"Skill"),               "user allow must be present");
+        assert!(
+            allow_raws.contains(&"Agent(task-planner)"),
+            "local allow must be present"
+        );
+        assert!(
+            allow_raws.contains(&"Bash(npm test)"),
+            "project allow must be present"
+        );
+        assert!(allow_raws.contains(&"Skill"), "user allow must be present");
         assert_eq!(merged.allow.len(), 3);
     }
 
@@ -288,9 +300,17 @@ mod tests {
         let merged = Allowlist::cascade(&local, &project, &user);
 
         let allow_raws = raw_strs(&merged.allow);
-        assert_eq!(allow_raws, vec!["A", "B", "C"], "allow order must be local→project→user");
+        assert_eq!(
+            allow_raws,
+            vec!["A", "B", "C"],
+            "allow order must be local→project→user"
+        );
 
         let deny_raws = raw_strs(&merged.deny);
-        assert_eq!(deny_raws, vec!["X", "Y", "Z"], "deny order must be local→project→user");
+        assert_eq!(
+            deny_raws,
+            vec!["X", "Y", "Z"],
+            "deny order must be local→project→user"
+        );
     }
 }

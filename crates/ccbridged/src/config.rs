@@ -57,7 +57,6 @@ pub struct Config {
     pub tokens: TokensConfig,
 }
 
-
 // ---------------------------------------------------------------------------
 // [approvals]
 // ---------------------------------------------------------------------------
@@ -133,7 +132,6 @@ pub struct Emit {
     #[serde(default)]
     pub http: HttpConfig,
 }
-
 
 // ---------------------------------------------------------------------------
 // [emit.notify]
@@ -290,8 +288,7 @@ impl Config {
         }
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("read config file {}", path.display()))?;
-        toml::from_str(&raw)
-            .with_context(|| format!("parse config file {}", path.display()))
+        toml::from_str(&raw).with_context(|| format!("parse config file {}", path.display()))
     }
 }
 
@@ -448,18 +445,13 @@ timeout_ms = 10000
         match fallback {
             Fallback::Passthrough => (
                 PermissionDecision::Ask,
-                Some(
-                    "ccbridge: approval timeout — falling back to interactive prompt".to_owned(),
-                ),
+                Some("ccbridge: approval timeout — falling back to interactive prompt".to_owned()),
             ),
             Fallback::Deny => (
                 PermissionDecision::Deny,
                 Some("ccbridge: approval timeout — denying per config".to_owned()),
             ),
-            Fallback::Allow => (
-                PermissionDecision::Allow,
-                None,
-            ),
+            Fallback::Allow => (PermissionDecision::Allow, None),
         }
     }
 
@@ -516,7 +508,10 @@ timeout_ms = 10000
 
     #[test]
     fn approvals_timeout_converts_ms_to_duration() {
-        let a = Approvals { timeout_ms: 5_000, fallback: Fallback::Passthrough };
+        let a = Approvals {
+            timeout_ms: 5_000,
+            fallback: Fallback::Passthrough,
+        };
         assert_eq!(a.timeout(), Duration::from_secs(5));
     }
 }

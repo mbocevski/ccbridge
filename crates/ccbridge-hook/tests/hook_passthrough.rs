@@ -80,14 +80,21 @@ fn round_trip_via_fake_daemon() {
         // Simply call accept() — it will complete once the hook connects.
         listener.accept().expect("accept hook connection")
     };
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     // Read the event line the hook sent.
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
-    assert!(!line.trim().is_empty(), "hook must send a non-empty event line");
+    assert!(
+        !line.trim().is_empty(),
+        "hook must send a non-empty event line"
+    );
 
     // Write the fake response and close.
     {

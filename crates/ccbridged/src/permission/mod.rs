@@ -153,18 +153,13 @@ async fn run_settings_watcher(
             match ev_rx.try_recv() {
                 Ok(Ok(event)) => {
                     use notify::EventKind;
-                    let relevant = matches!(
-                        event.kind,
-                        EventKind::Modify(_) | EventKind::Create(_)
-                    );
+                    let relevant =
+                        matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
                     if !relevant {
                         continue;
                     }
                     // Filter to the specific settings.json path.
-                    let touches_settings = event
-                        .paths
-                        .iter()
-                        .any(|p| p == &settings_path);
+                    let touches_settings = event.paths.iter().any(|p| p == &settings_path);
                     if !touches_settings {
                         continue;
                     }
@@ -241,10 +236,7 @@ pub fn evaluate(event: &PreToolUseEvent, allowlist: &Allowlist) -> Decision {
         match p.matches(event) {
             MatchResult::Confident => {
                 return Decision::Deny {
-                    reason: format!(
-                        "settings.json deny-list rule {:?} matched",
-                        p.raw()
-                    ),
+                    reason: format!("settings.json deny-list rule {:?} matched", p.raw()),
                 };
             }
             MatchResult::Ambiguous => {
@@ -266,10 +258,7 @@ pub fn evaluate(event: &PreToolUseEvent, allowlist: &Allowlist) -> Decision {
         match p.matches(event) {
             MatchResult::Confident => {
                 return Decision::Allow {
-                    reason: format!(
-                        "settings.json allow-list rule {:?} matched",
-                        p.raw()
-                    ),
+                    reason: format!("settings.json allow-list rule {:?} matched", p.raw()),
                 };
             }
             MatchResult::Ambiguous => {
@@ -318,12 +307,14 @@ mod tests {
         }
     }
 
-    fn empty() -> Allowlist { Allowlist::empty() }
+    fn empty() -> Allowlist {
+        Allowlist::empty()
+    }
 
     fn allowlist_with(allow: &[&str], deny: &[&str]) -> Allowlist {
         Allowlist {
             allow: allow.iter().map(|s| Pattern::parse(s)).collect(),
-            deny:  deny.iter().map(|s| Pattern::parse(s)).collect(),
+            deny: deny.iter().map(|s| Pattern::parse(s)).collect(),
         }
     }
 
@@ -423,7 +414,10 @@ mod tests {
         assert!(
             matches!(
                 evaluate(&e, &al),
-                Decision::AskAnnotated { source: AllowOrDeny::Deny, .. }
+                Decision::AskAnnotated {
+                    source: AllowOrDeny::Deny,
+                    ..
+                }
             ),
             "ambiguous deny must return AskAnnotated with source=Deny"
         );
@@ -437,7 +431,9 @@ mod tests {
         let al = Allowlist {
             deny: vec![
                 // Unparseable → Ambiguous when "Bash" appears in the raw string.
-                Pattern::Unparseable { raw: "Bash[[invalid".to_owned() },
+                Pattern::Unparseable {
+                    raw: "Bash[[invalid".to_owned(),
+                },
                 // BashPrefix → Confident on `rm` commands.
                 Pattern::parse("Bash(rm:*)"),
             ],
@@ -469,7 +465,10 @@ mod tests {
         assert!(
             matches!(
                 evaluate(&e, &al),
-                Decision::AskAnnotated { source: AllowOrDeny::Allow, .. }
+                Decision::AskAnnotated {
+                    source: AllowOrDeny::Allow,
+                    ..
+                }
             ),
             "ambiguous allow must return AskAnnotated with source=Allow"
         );
@@ -493,7 +492,11 @@ mod tests {
     #[test]
     fn evaluate_no_match_returns_intercept() {
         let al = allowlist_with(&["Skill"], &["Read(**/.env*)"]);
-        let e = pre_tool_use("Bash", PermissionMode::Default, json!({"command": "echo hi"}));
+        let e = pre_tool_use(
+            "Bash",
+            PermissionMode::Default,
+            json!({"command": "echo hi"}),
+        );
         assert!(matches!(evaluate(&e, &al), Decision::Intercept));
     }
 
@@ -505,7 +508,10 @@ mod tests {
         // Bash event with NO command field → Ambiguous.
         let e = pre_tool_use("Bash", PermissionMode::Default, json!({}));
         match evaluate(&e, &al) {
-            Decision::AskAnnotated { ref matched_pattern, source } => {
+            Decision::AskAnnotated {
+                ref matched_pattern,
+                source,
+            } => {
                 assert_eq!(
                     matched_pattern, "Bash(git status:*)",
                     "matched_pattern must be the raw settings.json string"
@@ -520,9 +526,13 @@ mod tests {
     fn evaluate_real_world_skill_allows() {
         // Real-world settings: "Skill" in allow.
         let al = allowlist_with(
-            &["Skill", "mcp__plugin_context7_context7__resolve-library-id",
-              "mcp__plugin_context7_context7__query-docs",
-              "mcp__plugin_backlog_tasks__*", "Agent(task-planner)"],
+            &[
+                "Skill",
+                "mcp__plugin_context7_context7__resolve-library-id",
+                "mcp__plugin_context7_context7__query-docs",
+                "mcp__plugin_backlog_tasks__*",
+                "Agent(task-planner)",
+            ],
             &[],
         );
         let e = pre_tool_use("Skill", PermissionMode::Default, json!({}));
@@ -532,10 +542,7 @@ mod tests {
     #[test]
     fn evaluate_real_world_deny_dotenv_read() {
         // Real-world deny pattern: "Read(**/.env*)".
-        let al = allowlist_with(
-            &[],
-            &["Read(**/.env*)"],
-        );
+        let al = allowlist_with(&[], &["Read(**/.env*)"]);
         let e = pre_tool_use(
             "Read",
             PermissionMode::Default,
@@ -559,7 +566,11 @@ mod tests {
         let _handle = spawn_settings_watcher(path.clone(), allowlist.clone());
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(allowlist.load().allow.len(), 0, "initial allowlist must be empty");
+        assert_eq!(
+            allowlist.load().allow.len(),
+            0,
+            "initial allowlist must be empty"
+        );
 
         // Update file to add one allow pattern.
         std::fs::write(&path, r#"{"permissions":{"allow":["Skill"]}}"#).unwrap();
@@ -592,7 +603,11 @@ mod tests {
         let _handle = spawn_settings_watcher(path.clone(), allowlist.clone());
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(allowlist.load().allow.len(), 1, "pre-condition: one allow pattern");
+        assert_eq!(
+            allowlist.load().allow.len(),
+            1,
+            "pre-condition: one allow pattern"
+        );
 
         // Overwrite with invalid JSON (simulates an editor mid-save).
         std::fs::write(&path, b"not valid json at all").unwrap();

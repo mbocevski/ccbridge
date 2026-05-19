@@ -107,7 +107,9 @@ impl Pattern {
         let trimmed = raw.trim();
 
         if trimmed.is_empty() {
-            return Self::Unparseable { raw: raw.to_owned() };
+            return Self::Unparseable {
+                raw: raw.to_owned(),
+            };
         }
 
         // Tool-with-args: contains a `(`.
@@ -154,7 +156,9 @@ impl Pattern {
                 }
             }
 
-            Self::ToolWithArgs { tool, arg_matcher, .. } => {
+            Self::ToolWithArgs {
+                tool, arg_matcher, ..
+            } => {
                 if event.tool_name != *tool {
                     return MatchResult::NoMatch;
                 }
@@ -199,11 +203,15 @@ impl Pattern {
             Some(i) => i,
             None => {
                 // No closing paren — treat as unparseable.
-                return Self::Unparseable { raw: raw.to_owned() };
+                return Self::Unparseable {
+                    raw: raw.to_owned(),
+                };
             }
         };
         if paren_close <= paren_open {
-            return Self::Unparseable { raw: raw.to_owned() };
+            return Self::Unparseable {
+                raw: raw.to_owned(),
+            };
         }
 
         let tool = trimmed[..paren_open].trim().to_owned();
@@ -253,7 +261,9 @@ impl Pattern {
                 };
             }
             // Degenerate case like raw = "*" — treat as unparseable.
-            return Self::Unparseable { raw: raw.to_owned() };
+            return Self::Unparseable {
+                raw: raw.to_owned(),
+            };
         }
 
         Self::McpExact {
@@ -413,7 +423,11 @@ mod tests {
     fn parse_agent_exact_arg() {
         let p = Pattern::parse("Agent(task-planner)");
         match p {
-            Pattern::ToolWithArgs { ref tool, arg_matcher: ArgMatcher::Exact(ref s), .. } => {
+            Pattern::ToolWithArgs {
+                ref tool,
+                arg_matcher: ArgMatcher::Exact(ref s),
+                ..
+            } => {
                 assert_eq!(tool, "Agent");
                 assert_eq!(s, "task-planner");
             }
@@ -470,7 +484,13 @@ mod tests {
     fn parse_unknown_tool_with_args_uses_ambiguous_matcher() {
         let p = Pattern::parse("FutureTool(some-arg)");
         assert!(
-            matches!(p, Pattern::ToolWithArgs { arg_matcher: ArgMatcher::Ambiguous, .. }),
+            matches!(
+                p,
+                Pattern::ToolWithArgs {
+                    arg_matcher: ArgMatcher::Ambiguous,
+                    ..
+                }
+            ),
             "expected ToolWithArgs with Ambiguous matcher, got {p:?}"
         );
     }
@@ -494,7 +514,13 @@ mod tests {
         // A glob with unmatched `[` is invalid.
         let p = Pattern::parse("Read([invalid)");
         assert!(
-            matches!(p, Pattern::ToolWithArgs { arg_matcher: ArgMatcher::Ambiguous, .. }),
+            matches!(
+                p,
+                Pattern::ToolWithArgs {
+                    arg_matcher: ArgMatcher::Ambiguous,
+                    ..
+                }
+            ),
             "glob compile failure must produce Ambiguous matcher, got {p:?}"
         );
     }
@@ -576,7 +602,10 @@ mod tests {
     #[test]
     fn read_path_glob_matches_dotenv() {
         let p = Pattern::parse("Read(**/.env*)");
-        let e = event_for("Read", json!({"file_path": "/home/user/project/.env.production"}));
+        let e = event_for(
+            "Read",
+            json!({"file_path": "/home/user/project/.env.production"}),
+        );
         assert_eq!(p.matches(&e), MatchResult::Confident);
     }
 
@@ -619,14 +648,18 @@ mod tests {
     #[test]
     fn unparseable_with_tool_name_in_raw_is_ambiguous() {
         // A pattern that names Bash but we can't parse.
-        let p = Pattern::Unparseable { raw: "Bash[[invalid".to_owned() };
+        let p = Pattern::Unparseable {
+            raw: "Bash[[invalid".to_owned(),
+        };
         let e = event_for("Bash", json!({}));
         assert_eq!(p.matches(&e), MatchResult::Ambiguous);
     }
 
     #[test]
     fn unparseable_without_tool_name_is_no_match() {
-        let p = Pattern::Unparseable { raw: "SomeWeirdSyntax".to_owned() };
+        let p = Pattern::Unparseable {
+            raw: "SomeWeirdSyntax".to_owned(),
+        };
         let e = event_for("Bash", json!({}));
         assert_eq!(p.matches(&e), MatchResult::NoMatch);
     }
@@ -639,7 +672,10 @@ mod tests {
         // Bare filename (no leading path).
         let e_bare = event_for("Read", json!({"file_path": ".env.production"}));
         // Absolute path with several components.
-        let e_abs = event_for("Read", json!({"file_path": "/home/user/dev/project/.env.production"}));
+        let e_abs = event_for(
+            "Read",
+            json!({"file_path": "/home/user/dev/project/.env.production"}),
+        );
         assert_eq!(
             p.matches(&e_bare),
             MatchResult::Confident,

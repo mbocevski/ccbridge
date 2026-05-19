@@ -28,8 +28,8 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use ccbridge_proto::hook::{PermissionDecision, PreToolUseOutput, PreToolUseResponse};
 use ccbridge_proto::buddy::WireDecision;
+use ccbridge_proto::hook::{PermissionDecision, PreToolUseOutput, PreToolUseResponse};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -239,9 +239,7 @@ fn fallback_response(fallback: Fallback) -> (PermissionDecision, Option<String>)
     match fallback {
         Fallback::Passthrough => (
             PermissionDecision::Ask,
-            Some(
-                "ccbridge: approval timeout — falling back to interactive prompt".to_owned(),
-            ),
+            Some("ccbridge: approval timeout — falling back to interactive prompt".to_owned()),
         ),
         Fallback::Deny => (
             PermissionDecision::Deny,

@@ -26,8 +26,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use ccbridged::emit::ctrl as ctrl_emit;
-use ccbridged::ingest::{hooks as hook_ingest, jsonl::{spawn_watcher, PersistedTokens}};
-use ccbridged::state::{DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator};
+use ccbridged::ingest::{
+    hooks as hook_ingest,
+    jsonl::{spawn_watcher, PersistedTokens},
+};
+use ccbridged::state::{spawn as spawn_aggregator, DEFAULT_APPROVAL_TIMEOUT};
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -54,7 +57,13 @@ async fn setup_full(approval_timeout: Duration) -> FullSetup {
     std::fs::create_dir_all(&ccbridge_dir).expect("mkdir ccbridge");
     std::fs::create_dir_all(&projects_dir).expect("mkdir projects");
 
-    let (agg_tx, hb_rx) = spawn_aggregator(approval_timeout, ccbridged::config::Fallback::default(), std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
+    let (agg_tx, hb_rx) = spawn_aggregator(
+        approval_timeout,
+        ccbridged::config::Fallback::default(),
+        std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            ccbridged::permission::Allowlist::empty(),
+        ))),
+    );
 
     ctrl_emit::spawn(
         runtime_dir.clone(),
@@ -76,7 +85,11 @@ async fn setup_full(approval_timeout: Duration) -> FullSetup {
     // Give all four accept loops a moment to bind.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    FullSetup { _dir: dir, runtime_dir, projects_dir }
+    FullSetup {
+        _dir: dir,
+        runtime_dir,
+        projects_dir,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +102,10 @@ fn ctrl_sock_path(runtime_dir: &Path) -> PathBuf {
 
 async fn ctrl_connect(
     runtime_dir: &Path,
-) -> (BufReader<tokio::net::unix::OwnedReadHalf>, tokio::net::unix::OwnedWriteHalf) {
+) -> (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
     let stream = UnixStream::connect(ctrl_sock_path(runtime_dir))
         .await
         .expect("connect to ctrl.sock");
@@ -105,10 +121,7 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     serde_json::from_str(line.trim_end()).expect("deserialize JSON")
 }
 
-async fn write_json<T: serde::Serialize>(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    value: &T,
-) {
+async fn write_json<T: serde::Serialize>(writer: &mut tokio::net::unix::OwnedWriteHalf, value: &T) {
     let mut bytes = serde_json::to_vec(value).expect("serialize");
     bytes.push(b'\n');
     writer.write_all(&bytes).await.expect("write");
@@ -117,7 +130,7 @@ async fn write_json<T: serde::Serialize>(
 /// Consume the initial hello + snapshot that every ctrl client receives on connect.
 async fn drain_handshake(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) {
     let _: HelloMessage = read_json(reader).await; // hello
-    let _: Heartbeat = read_json(reader).await;    // initial snapshot
+    let _: Heartbeat = read_json(reader).await; // initial snapshot
 }
 
 /// Poll `reader` until the next heartbeat satisfying `pred` arrives, or panic on timeout.
@@ -165,7 +178,8 @@ fn hook_bin() -> PathBuf {
         return PathBuf::from(p);
     }
     let mut p = std::env::current_exe().unwrap();
-    p.pop(); p.pop();
+    p.pop();
+    p.pop();
     p.push("ccbridge-hook");
     p
 }
@@ -197,7 +211,11 @@ async fn golden_path() {
     // ── 2. Ctrl client: subscribe to heartbeats ──────────────────────────────
     let (mut ctrl_r, mut ctrl_w) = ctrl_connect(&setup.runtime_dir).await;
     drain_handshake(&mut ctrl_r).await;
-    write_json(&mut ctrl_w, &json!({"cmd": "subscribe", "topics": ["heartbeat"]})).await;
+    write_json(
+        &mut ctrl_w,
+        &json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
     let _: Ack = read_json(&mut ctrl_r).await; // subscribe ack
 
     // ── 3. Spawn ccbridge-hook ────────────────────────────────────────────────
@@ -235,8 +253,7 @@ async fn golden_path() {
 
     // ── 4. Wait for waiting=1 and send permission ────────────────────────────
     let hb = wait_for_heartbeat(&mut ctrl_r, |hb| {
-        hb.waiting == 1
-            && hb.prompt.as_ref().is_some_and(|p| p.id == tool_use_id)
+        hb.waiting == 1 && hb.prompt.as_ref().is_some_and(|p| p.id == tool_use_id)
     })
     .await;
     assert_eq!(hb.waiting, 1);
@@ -252,7 +269,11 @@ async fn golden_path() {
 
     // ── 5. Assert hook output ────────────────────────────────────────────────
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "hook must exit 0: {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "hook must exit 0: {:?}",
+        output.status
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("\"permissionDecision\":\"allow\""),
@@ -263,7 +284,11 @@ async fn golden_path() {
     // Give the JSONL watcher time to pick up the file (polls at 50ms).
     tokio::time::sleep(Duration::from_millis(200)).await;
     let hb = wait_for_heartbeat(&mut ctrl_r, |hb| hb.tokens >= 200).await;
-    assert!(hb.tokens >= 200, "expected tokens >= 200, got {}", hb.tokens);
+    assert!(
+        hb.tokens >= 200,
+        "expected tokens >= 200, got {}",
+        hb.tokens
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -321,8 +346,7 @@ async fn timeout_passthrough() {
     let v: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("timeout stdout must be valid JSON");
     assert_eq!(
-        v["hookSpecificOutput"]["permissionDecision"],
-        "ask",
+        v["hookSpecificOutput"]["permissionDecision"], "ask",
         "timeout fallback must be 'ask', got: {stdout:?}",
     );
     assert!(
@@ -350,9 +374,17 @@ async fn multiple_ctrl_subscribers() {
     drain_handshake(&mut r1).await;
     drain_handshake(&mut r2).await;
 
-    write_json(&mut w1, &json!({"cmd": "subscribe", "topics": ["heartbeat"]})).await;
+    write_json(
+        &mut w1,
+        &json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
     let _: Ack = read_json(&mut r1).await;
-    write_json(&mut w2, &json!({"cmd": "subscribe", "topics": ["heartbeat"]})).await;
+    write_json(
+        &mut w2,
+        &json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
     let _: Ack = read_json(&mut r2).await;
 
     // Inject a SessionStart via the hook binary to exercise the real ingress path.
@@ -403,7 +435,11 @@ async fn jsonl_tokens_reflected_in_heartbeat() {
     // Connect ctrl client and subscribe.
     let (mut ctrl_r, mut ctrl_w) = ctrl_connect(&setup.runtime_dir).await;
     drain_handshake(&mut ctrl_r).await;
-    write_json(&mut ctrl_w, &json!({"cmd": "subscribe", "topics": ["heartbeat"]})).await;
+    write_json(
+        &mut ctrl_w,
+        &json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
     let _: Ack = read_json(&mut ctrl_r).await;
 
     // Write a JSONL file with 350 output tokens.

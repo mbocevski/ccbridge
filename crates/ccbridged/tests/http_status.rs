@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use ccbridged::emit::http as http_emit;
-use ccbridged::state::{DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator};
+use ccbridged::state::{spawn as spawn_aggregator, DEFAULT_APPROVAL_TIMEOUT};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,9 +33,7 @@ async fn setup() -> (ccbridged::state::AggregatorTx, SocketAddr) {
 /// Send a minimal HTTP/1.1 request and return the status code + body.
 async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).await.expect("connect");
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-    );
+    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",);
     stream.write_all(req.as_bytes()).await.unwrap();
 
     let mut buf = Vec::new();
@@ -67,9 +65,8 @@ async fn get_status_returns_heartbeat_json() {
     assert_eq!(status, 200, "GET /status must return 200");
 
     // Body must be valid JSON that deserialises into a Heartbeat.
-    let hb: Heartbeat = serde_json::from_str(&body).unwrap_or_else(|e| {
-        panic!("GET /status body is not a valid Heartbeat: {e}\nbody: {body}")
-    });
+    let hb: Heartbeat = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("GET /status body is not a valid Heartbeat: {e}\nbody: {body}"));
 
     assert_eq!(hb.total, 0, "fresh aggregator has no sessions");
     assert!(hb.tokens_today < u64::MAX);
@@ -99,4 +96,3 @@ async fn post_status_returns_404() {
         .unwrap_or(0);
     assert_eq!(status, 404);
 }
-

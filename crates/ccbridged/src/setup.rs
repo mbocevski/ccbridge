@@ -89,7 +89,10 @@ fn do_setup() -> Result<()> {
     }
 
     if !added.is_empty() {
-        println!("ccbridged setup: registered hooks for: {}", added.join(", "));
+        println!(
+            "ccbridged setup: registered hooks for: {}",
+            added.join(", ")
+        );
     }
     if !present.is_empty() {
         println!(
@@ -99,9 +102,16 @@ fn do_setup() -> Result<()> {
     }
     println!(
         "ccbridged setup: service enabled: {}",
-        if service_ok { "yes" } else { "no (see above warning)" }
+        if service_ok {
+            "yes"
+        } else {
+            "no (see above warning)"
+        }
     );
-    println!("ccbridged setup: done — settings written to {}", settings_path.display());
+    println!(
+        "ccbridged setup: done — settings written to {}",
+        settings_path.display()
+    );
 
     Ok(())
 }
@@ -170,12 +180,18 @@ pub fn merge_hooks(settings: &mut Value) -> Vec<HookMergeResult> {
             .any(group_has_ccbridge_hook);
 
         if already {
-            results.push(HookMergeResult { event, action: HookAction::AlreadyPresent });
+            results.push(HookMergeResult {
+                event,
+                action: HookAction::AlreadyPresent,
+            });
         } else {
             event_arr.as_array_mut().unwrap().push(json!({
                 "hooks": [{"type": "command", "command": HOOK_COMMAND}]
             }));
-            results.push(HookMergeResult { event, action: HookAction::Added });
+            results.push(HookMergeResult {
+                event,
+                action: HookAction::Added,
+            });
         }
     }
 
@@ -189,12 +205,9 @@ fn group_has_ccbridge_hook(group: &Value) -> bool {
         .get("hooks")
         .and_then(|h| h.as_array())
         .map(|entries| {
-            entries.iter().any(|entry| {
-                entry
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    == Some(HOOK_COMMAND)
-            })
+            entries
+                .iter()
+                .any(|entry| entry.get("command").and_then(|c| c.as_str()) == Some(HOOK_COMMAND))
         })
         .unwrap_or(false)
 }
@@ -212,8 +225,7 @@ pub fn load_settings(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| {
         format!(
             "{} is not valid JSON — please fix it manually before running setup",
@@ -312,7 +324,12 @@ mod tests {
 
     fn all_added(results: &[HookMergeResult]) {
         for r in results {
-            assert_eq!(r.action, HookAction::Added, "expected Added for {}", r.event);
+            assert_eq!(
+                r.action,
+                HookAction::Added,
+                "expected Added for {}",
+                r.event
+            );
         }
     }
 
@@ -392,7 +409,12 @@ mod tests {
         let pre = results.iter().find(|r| r.event == "PreToolUse").unwrap();
         assert_eq!(pre.action, HookAction::AlreadyPresent);
         for r in results.iter().filter(|r| r.event != "PreToolUse") {
-            assert_eq!(r.action, HookAction::Added, "expected Added for {}", r.event);
+            assert_eq!(
+                r.action,
+                HookAction::Added,
+                "expected Added for {}",
+                r.event
+            );
         }
     }
 

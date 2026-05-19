@@ -152,9 +152,7 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
     let mut closed_stream = match proxy.receive_notification_closed().await {
         Ok(s) => s,
         Err(e) => {
-            warn!(
-                "notify: cannot subscribe to NotificationClosed: {e} — disabling notify emitter"
-            );
+            warn!("notify: cannot subscribe to NotificationClosed: {e} — disabling notify emitter");
             return Ok(());
         }
     };
@@ -343,10 +341,14 @@ async fn handle_heartbeat(
             // actions: flat list of (key, label) pairs.
             // "default" key = clicking the notification body.
             let actions: &[&str] = &[
-                "default", "Approve once",
-                "once",    "Approve once",
-                "always",  "Always",
-                "deny",    "Deny",
+                "default",
+                "Approve once",
+                "once",
+                "Approve once",
+                "always",
+                "Always",
+                "deny",
+                "Deny",
             ];
 
             // hints: urgency = 2 (critical) — never auto-dismissed.
@@ -398,7 +400,10 @@ async fn handle_heartbeat(
             // No pending prompt — a decision arrived from another emitter (BLE,
             // ctrl socket) or the session resolved naturally.  Close everything.
             if !active.is_empty() {
-                debug!("notify: prompt cleared externally — closing {} notification(s)", active.len());
+                debug!(
+                    "notify: prompt cleared externally — closing {} notification(s)",
+                    active.len()
+                );
                 close_all(proxy, active).await;
                 *last_notif_id = 0;
             }
@@ -429,8 +434,7 @@ async fn handle_action(
         None => {
             debug!(
                 notif_id,
-                action_key,
-                "notify: ActionInvoked for unknown/stale notification — ignoring",
+                action_key, "notify: ActionInvoked for unknown/stale notification — ignoring",
             );
             return;
         }
@@ -468,7 +472,11 @@ async fn handle_action(
                 .await;
         }
         other => {
-            debug!(notif_id, action_key = other, "notify: unknown action key — ignoring");
+            debug!(
+                notif_id,
+                action_key = other,
+                "notify: unknown action key — ignoring"
+            );
             // Put it back: we consumed it from the map but didn't act.
             active.insert(notif_id, tool_use_id);
             return;
@@ -515,7 +523,10 @@ async fn close_all(proxy: &NotificationsProxy<'_>, active: &mut HashMap<u32, Str
     for (id, tool_use_id) in active.drain() {
         debug!(notif_id = id, tool_use_id = %tool_use_id, "notify: closing notification");
         if let Err(e) = proxy.close_notification(id).await {
-            debug!(notif_id = id, "notify: CloseNotification error (stale id?): {e}");
+            debug!(
+                notif_id = id,
+                "notify: CloseNotification error (stale id?): {e}"
+            );
         }
     }
 }
@@ -611,15 +622,15 @@ mod tests {
     #[test]
     fn shorten_cwd_replaces_home_with_tilde() {
         assert_eq!(shorten_cwd_with_home("/home/u/dev/x", "/home/u"), "~/dev/x");
-        assert_eq!(shorten_cwd_with_home("/home/u",        "/home/u"), "~");
-        assert_eq!(shorten_cwd_with_home("/home/u/x",      "/home/u"), "~/x");
+        assert_eq!(shorten_cwd_with_home("/home/u", "/home/u"), "~");
+        assert_eq!(shorten_cwd_with_home("/home/u/x", "/home/u"), "~/x");
     }
 
     #[test]
     fn shorten_cwd_keeps_short_absolute_paths() {
         assert_eq!(shorten_cwd_with_home("/tmp/new", "/home/u"), "/tmp/new");
-        assert_eq!(shorten_cwd_with_home("/srv",     "/home/u"), "/srv");
-        assert_eq!(shorten_cwd_with_home("/",        "/home/u"), "/");
+        assert_eq!(shorten_cwd_with_home("/srv", "/home/u"), "/srv");
+        assert_eq!(shorten_cwd_with_home("/", "/home/u"), "/");
     }
 
     #[test]
@@ -627,7 +638,10 @@ mod tests {
         let long = "/home/u/dev/aiven/aiven-design-system/very/deep";
         let out = shorten_cwd_with_home(long, "/home/u");
         assert!(out.starts_with("~/…/"), "expected ~/…/... got {out:?}");
-        assert!(out.contains("very/deep"), "expected tail very/deep, got {out:?}");
+        assert!(
+            out.contains("very/deep"),
+            "expected tail very/deep, got {out:?}"
+        );
     }
 
     #[test]
@@ -635,7 +649,10 @@ mod tests {
         let long = "/var/lib/postgres/data/very/deep/path";
         let out = shorten_cwd_with_home(long, "/home/u");
         assert!(out.starts_with("/…/"), "expected /…/... got {out:?}");
-        assert!(out.contains("deep/path"), "expected tail deep/path, got {out:?}");
+        assert!(
+            out.contains("deep/path"),
+            "expected tail deep/path, got {out:?}"
+        );
     }
 
     #[test]
@@ -653,7 +670,10 @@ mod tests {
     fn shorten_cwd_partial_home_match_not_substituted() {
         // /home/used must NOT match /home/u — substring vs prefix.
         let out = shorten_cwd_with_home("/home/used/x", "/home/u");
-        assert!(!out.starts_with('~'), "partial prefix must not substitute ~, got {out:?}");
+        assert!(
+            !out.starts_with('~'),
+            "partial prefix must not substitute ~, got {out:?}"
+        );
         assert_eq!(out, "/home/used/x");
     }
 

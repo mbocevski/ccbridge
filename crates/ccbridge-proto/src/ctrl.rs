@@ -168,12 +168,20 @@ pub struct Ack {
 impl Ack {
     /// Successful ack for `cmd`.
     pub fn ok(cmd: impl Into<String>) -> Self {
-        Self { ack: cmd.into(), ok: true, error: None }
+        Self {
+            ack: cmd.into(),
+            ok: true,
+            error: None,
+        }
     }
 
     /// Error ack for `cmd`.
     pub fn err(cmd: impl Into<String>, error: impl Into<String>) -> Self {
-        Self { ack: cmd.into(), ok: false, error: Some(error.into()) }
+        Self {
+            ack: cmd.into(),
+            ok: false,
+            error: Some(error.into()),
+        }
     }
 
     /// Standard ack for an unrecognised command.
@@ -269,7 +277,13 @@ mod tests {
     fn permission_deny_round_trip() {
         let raw = json!({"cmd": "permission", "id": "req_xyz", "decision": "deny"});
         let cmd: Command = serde_json::from_value(raw).unwrap();
-        assert!(matches!(cmd, Command::Permission { decision: WireDecision::Deny, .. }));
+        assert!(matches!(
+            cmd,
+            Command::Permission {
+                decision: WireDecision::Deny,
+                ..
+            }
+        ));
     }
 
     // -----------------------------------------------------------------------

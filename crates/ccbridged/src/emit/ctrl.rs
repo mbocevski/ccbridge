@@ -133,7 +133,10 @@ async fn accept_loop(
     // `cargo run` iteration stays smooth.
     let under_systemd = std::env::var_os("XDG_RUNTIME_DIR").is_some();
     if !under_systemd && sock_path.exists() {
-        debug!("dev-mode: removing stale ctrl socket at {}", sock_path.display());
+        debug!(
+            "dev-mode: removing stale ctrl socket at {}",
+            sock_path.display()
+        );
         std::fs::remove_file(&sock_path)?;
     }
 
