@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, error, warn};
 
+use crate::config::Fallback;
 use crate::state::{AggregatorMsg, AggregatorTx, HookResponse};
 
 // ---------------------------------------------------------------------------
@@ -185,6 +186,7 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
             rx,
             approval_timeout,
             tool_use_id,
+            fallback,
             ..
         } => {
             // Wait for an emit module (notify / BLE / ctrl-socket) to resolve.
@@ -210,16 +212,13 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
                             tool_use_id: tool_use_id.clone(),
                         })
                         .await;
-                    // 2. Send `ask` so Claude Code surfaces its own TUI prompt
-                    //    regardless of the user's permission mode.
-                    debug!("hook: approval timeout — clearing state + falling back to Ask");
-                    let resp = pre_tool_use_response(
-                        PermissionDecision::Ask,
-                        Some(
-                            "ccbridge: approval timeout — falling back to interactive prompt"
-                                .to_owned(),
-                        ),
+                    // 2. Apply the configured fallback policy.
+                    let (permission_decision, reason) = fallback_response(fallback);
+                    debug!(
+                        ?fallback,
+                        "hook: approval timeout — clearing state + applying fallback",
                     );
+                    let resp = pre_tool_use_response(permission_decision, reason);
                     write_json_line(&mut writer, &resp).await?;
                 }
             }
@@ -232,6 +231,24 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Map the configured [`Fallback`] to a `(PermissionDecision, Option<String>)`
+/// pair for writing on the hook stdout wire.
+fn fallback_response(fallback: Fallback) -> (PermissionDecision, Option<String>) {
+    match fallback {
+        Fallback::Passthrough => (
+            PermissionDecision::Ask,
+            Some(
+                "ccbridge: approval timeout — falling back to interactive prompt".to_owned(),
+            ),
+        ),
+        Fallback::Deny => (
+            PermissionDecision::Deny,
+            Some("ccbridge: approval timeout — denying per config".to_owned()),
+        ),
+        Fallback::Allow => (PermissionDecision::Allow, None),
+    }
+}
 
 /// The reason string sent back to Claude Code when a user explicitly denies a
 /// tool call.  Centralised here so it has one place to edit.

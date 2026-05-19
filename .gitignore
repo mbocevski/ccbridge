@@ -4,3 +4,5 @@
 /pkg/
 *.pkg.tar.zst
 *.pkg.tar.xz
+# Claude Code session metadata (worktrees, cache, etc.)
+/.claude/

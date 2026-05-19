@@ -11,5 +11,5 @@ pub mod state;
 #[doc(hidden)]
 pub mod setup;
 
-// Internal modules required by the above.
-pub(crate) mod config;
+// Config module — public so tests and main.rs can reach it.
+pub mod config;

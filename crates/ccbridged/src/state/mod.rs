@@ -33,6 +33,7 @@ use tracing::{debug, info, warn};
 
 use arc_swap::ArcSwap;
 
+use crate::config::Fallback;
 use crate::permission::{AllowOrDeny, Allowlist};
 
 // ---------------------------------------------------------------------------
@@ -140,7 +141,7 @@ pub enum HookResponse {
 
     /// The aggregator stored the approval oneshot; the ingest handler should
     /// await `rx` with `approval_timeout`, then write a `PermissionDecision`
-    /// or (on timeout) an `Ask` response carrying a reason.
+    /// or (on timeout) a response determined by `fallback`.
     ///
     /// This variant is consumed entirely within `ingest::hooks` and is never
     /// serialised to the wire.
@@ -150,6 +151,8 @@ pub enum HookResponse {
         tool_use_id: ToolUseId,
         session_id: SessionId,
         approval_timeout: Duration,
+        /// What to do when `approval_timeout` elapses with no decision.
+        fallback: Fallback,
     },
 }
 
@@ -250,9 +253,13 @@ pub struct Aggregator {
     /// Broadcast channel for heartbeat fanout to all emit modules.
     hb_tx: broadcast::Sender<Heartbeat>,
 
-    /// How long the ingest handler waits for an approval before falling back
-    /// to passthrough.  Owned here so it is surfaced in tests.
+    /// How long the ingest handler waits for an approval before applying the
+    /// fallback policy.  Owned here so it is surfaced in tests.
     pub approval_timeout: Duration,
+
+    /// What the ingest handler does when the approval timer elapses with no
+    /// decision from any emit module.
+    pub fallback: Fallback,
 
     /// Parsed `permissions.allow` / `.deny` from `~/.claude/settings.json`.
     ///
@@ -281,6 +288,7 @@ impl Aggregator {
     /// receiver that emit modules should subscribe to.
     pub fn new(
         approval_timeout: Duration,
+        fallback: Fallback,
         allowlist: Arc<ArcSwap<Allowlist>>,
     ) -> (Self, broadcast::Receiver<Heartbeat>) {
         let (hb_tx, hb_rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -291,6 +299,7 @@ impl Aggregator {
             entries: VecDeque::with_capacity(ENTRIES_CAP),
             hb_tx,
             approval_timeout,
+            fallback,
             allowlist,
         };
         (agg, hb_rx)
@@ -536,6 +545,7 @@ impl Aggregator {
             tool_use_id: e.tool_use_id,
             session_id: e.base.session_id,
             approval_timeout: self.approval_timeout,
+            fallback: self.fallback,
         });
     }
 
@@ -661,9 +671,10 @@ pub(crate) fn format_tool_hint(input: &serde_json::Value) -> String {
 /// before `run()` is called, or subscribe via the returned sender.
 pub fn spawn(
     approval_timeout: Duration,
+    fallback: Fallback,
     allowlist: Arc<ArcSwap<Allowlist>>,
 ) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
-    let (agg, hb_rx) = Aggregator::new(approval_timeout, allowlist);
+    let (agg, hb_rx) = Aggregator::new(approval_timeout, fallback, allowlist);
     let (tx, rx) = mpsc::channel(256);
     tokio::spawn(agg.run(rx));
     (tx, hb_rx)
@@ -755,6 +766,7 @@ mod tests {
     fn new_agg() -> Aggregator {
         let (agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
             Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))),
         );
         agg
@@ -836,6 +848,7 @@ mod tests {
         };
         let (mut agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
             Arc::new(ArcSwap::new(Arc::new(al))),
         );
 
@@ -1070,7 +1083,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_responds_to_get_heartbeat() {
-        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
         drop(hb_rx); // not needed here
 
         let (respond_tx, respond_rx) = oneshot::channel();
@@ -1084,7 +1097,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_session_start_increments_total() {
-        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
         drop(hb_rx);
 
         let (respond_tx, respond_rx) = oneshot::channel();
@@ -1106,7 +1119,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_pre_tool_use_then_permission_decision() {
-        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
 
         // Start a session.
         let (r1_tx, r1_rx) = oneshot::channel();
@@ -1162,7 +1175,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_daily_reset_zeroes_today_keeps_cumulative() {
-        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
 
         tx.send(AggregatorMsg::TokensUpdate { output_tokens: 5_000 }).await.unwrap();
         tx.send(AggregatorMsg::TokensUpdate { output_tokens: 3_000 }).await.unwrap();
@@ -1187,7 +1200,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_multiple_subscribers_all_receive_heartbeat() {
-        let (tx, hb_rx1) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
+        let (tx, hb_rx1) = spawn(DEFAULT_APPROVAL_TIMEOUT, crate::config::Fallback::default(), Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
         // Subscribe a second receiver before sending any messages.
         let mut hb_rx2 = hb_rx1.resubscribe();
         let mut hb_rx1 = hb_rx1;

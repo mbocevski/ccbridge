@@ -1,0 +1,72 @@
+# ccbridge daemon configuration
+#
+# Location: $XDG_CONFIG_HOME/ccbridge/config.toml
+#           (defaults to ~/.config/ccbridge/config.toml)
+#
+# All values shown below are the compiled-in defaults.
+# You only need to include keys you want to override.
+# Unknown keys are rejected with a clear error (no silent typo forgiveness).
+
+# ---------------------------------------------------------------------------
+# [approvals] — interactive approval behaviour
+# ---------------------------------------------------------------------------
+
+[approvals]
+
+# How long to wait for a decision from any emit module (notify, ctrl socket,
+# BLE) before falling back to the behaviour specified by `fallback`.
+timeout_ms = 30000
+
+# What to do when the timeout elapses with no decision:
+#
+#   "passthrough" (default) — send `ask` so Claude Code surfaces its own TUI
+#                             prompt regardless of the session's permission mode.
+#   "deny"                  — automatically deny with a reason; prevents Claude
+#                             from silently retrying alternative approaches.
+#   "allow"                 — automatically allow; useful on trusted machines
+#                             where you just want a notification log.
+fallback = "passthrough"
+
+# ---------------------------------------------------------------------------
+# [emit.notify] — freedesktop desktop notifications
+#                 (works with swaync, mako, dunst, GNOME, KDE, …)
+# ---------------------------------------------------------------------------
+
+[emit.notify]
+enabled = true
+
+# Urgency level passed to the notification daemon.
+# Values: "low", "normal", "critical"
+# "critical" means the notification is never auto-dismissed.
+urgency = "critical"
+
+# ---------------------------------------------------------------------------
+# [emit.ctrl] — bidirectional control socket
+#               ($XDG_RUNTIME_DIR/ccbridge/ctrl.sock)
+# ---------------------------------------------------------------------------
+
+[emit.ctrl]
+enabled = true
+
+# If true the ctrl socket accepts SimulateApproval messages from test clients.
+# Leave false in production.
+allow_simulate = false
+
+# ---------------------------------------------------------------------------
+# [emit.http] — optional HTTP emitter (disabled by default)
+# ---------------------------------------------------------------------------
+
+[emit.http]
+enabled = false
+addr    = "127.0.0.1:9876"
+
+# ---------------------------------------------------------------------------
+# [tokens] — token-usage persistence
+# ---------------------------------------------------------------------------
+
+[tokens]
+# Override the path where the token state (daily/cumulative counts) is stored.
+# Defaults to $XDG_STATE_HOME/ccbridge/tokens.json
+# (or $HOME/.local/state/ccbridge/tokens.json).
+# Uncomment and set to a custom path if needed:
+# state_path = "/home/user/.local/state/ccbridge/tokens.json"

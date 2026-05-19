@@ -55,7 +55,7 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
     use arc_swap::ArcSwap;
     use ccbridged::permission::{settings_path, spawn_settings_watcher, Allowlist};
-    use ccbridged::state::{spawn as spawn_aggregator, DEFAULT_APPROVAL_TIMEOUT};
+    use ccbridged::state::spawn as spawn_aggregator;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -63,6 +63,13 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
                 .add_directive("ccbridged=info".parse()?),
         )
         .init();
+
+    // Load config early; exit(1) on parse errors so typos are never silently
+    // swallowed.
+    let config = ccbridged::config::Config::load().unwrap_or_else(|e| {
+        eprintln!("ccbridged: failed to load config: {e:#}");
+        std::process::exit(1);
+    });
 
     info!("ccbridged starting");
 
@@ -119,7 +126,11 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     spawn_settings_watcher(sp, allowlist.clone());
 
     // Spawn the aggregator (single-writer state task + broadcast channel).
-    let (agg_tx, hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, allowlist);
+    let (agg_tx, hb_rx) = spawn_aggregator(
+        config.approvals.timeout(),
+        config.approvals.fallback,
+        allowlist,
+    );
 
     // Spawn hook ingest socket.
     hook_ingest::spawn(runtime_dir.clone(), agg_tx.clone());
@@ -147,10 +158,14 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         );
     }
 
-    // Spawn emit tasks.
+    // Spawn emit tasks (guarded by config flags).
     // swaync subscribes via resubscribe() so ctrl can consume hb_rx directly.
-    notify_emit::spawn(agg_tx.clone(), hb_rx.resubscribe());
-    ctrl_emit::spawn(runtime_dir, agg_tx, hb_rx, owner, tz_offset);
+    if config.emit.notify.enabled {
+        notify_emit::spawn(agg_tx.clone(), hb_rx.resubscribe());
+    }
+    if config.emit.ctrl.enabled {
+        ctrl_emit::spawn(runtime_dir, agg_tx, hb_rx, owner, tz_offset);
+    }
 
     info!("ccbridged ready");
 

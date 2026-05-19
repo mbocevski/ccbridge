@@ -35,7 +35,7 @@ async fn setup(
     // Create the ccbridge sub-directory that systemd would normally provision.
     std::fs::create_dir_all(runtime_dir.join("ccbridge")).expect("mkdir ccbridge");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(approval_timeout, std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
+    let (agg_tx, _hb_rx) = spawn_aggregator(approval_timeout, ccbridged::config::Fallback::default(), std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
     hook_ingest::spawn(runtime_dir.clone(), agg_tx.clone());
 
     // Give the accept loop a moment to bind.
