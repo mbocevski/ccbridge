@@ -69,7 +69,6 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
     use arc_swap::ArcSwap;
     use ccbridged::permission::{settings_path, spawn_settings_watcher, Allowlist};
-    use ccbridged::state::spawn as spawn_aggregator;
 
     tracing_subscriber::fmt()
         .with_env_filter(
