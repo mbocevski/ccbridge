@@ -74,7 +74,7 @@ pub struct Hello {
 // ---------------------------------------------------------------------------
 
 /// A subscription topic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Topic {
     /// Full heartbeat snapshot on every state change + 10s keepalive.
