@@ -184,6 +184,7 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
         HookResponse::AwaitDecision {
             rx,
             approval_timeout,
+            tool_use_id,
             ..
         } => {
             // Wait for an emit module (notify / BLE / ctrl-socket) to resolve.
@@ -202,11 +203,16 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
                 }
                 Err(_elapsed) => {
                     // Timeout elapsed with no decision from any emit module.
-                    // Send `ask` so Claude Code surfaces its own interactive TUI
-                    // prompt regardless of the user's permission mode.
-                    // Without this, bypassPermissions/skipDangerous setups
-                    // would silently auto-approve — surprising and unsafe.
-                    debug!("hook: approval timeout — falling back to Ask");
+                    // 1. Tell the aggregator to clear pending state so swaync /
+                    //    ctrl / BLE see prompt:None on the next heartbeat.
+                    let _ = agg_tx
+                        .send(AggregatorMsg::ApprovalTimedOut {
+                            tool_use_id: tool_use_id.clone(),
+                        })
+                        .await;
+                    // 2. Send `ask` so Claude Code surfaces its own TUI prompt
+                    //    regardless of the user's permission mode.
+                    debug!("hook: approval timeout — clearing state + falling back to Ask");
                     let resp = pre_tool_use_response(
                         PermissionDecision::Ask,
                         Some(

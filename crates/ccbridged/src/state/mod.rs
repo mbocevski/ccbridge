@@ -103,6 +103,17 @@ pub enum AggregatorMsg {
     /// Sent by the JSONL tail when it extracts assistant text content or tool
     /// summaries that should appear in `heartbeat.entries`.
     AddEntry { text: String },
+
+    /// The 30 s approval timeout in `ingest::hooks` fired before any emit
+    /// module (notify / BLE / ctrl) sent a decision.  The hook has already
+    /// written `Ask` to its stdout so Claude Code's own TUI will handle the
+    /// decision; the aggregator just needs to clear its pending state so the
+    /// next heartbeat shows `prompt: None` / `waiting: 0`.
+    ///
+    /// Dropping the sender from `pending_approvals` is safe: if a late decision
+    /// somehow arrives (race between timeout + emit module), the existing
+    /// `handle_permission_decision` path logs a warn and discards it.
+    ApprovalTimedOut { tool_use_id: ToolUseId },
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +610,20 @@ impl Aggregator {
                             self.push_entry(text);
                             self.broadcast_heartbeat();
                         }
+                        Some(AggregatorMsg::ApprovalTimedOut { tool_use_id }) => {
+                            // Drop the sender — any late decision arriving after
+                            // this will hit the "no pending approval" warn in
+                            // handle_permission_decision and be discarded.
+                            self.pending_approvals.remove(&tool_use_id);
+                            // Clear session waiting flags so the next heartbeat
+                            // has prompt: None / waiting: 0.
+                            for session in self.sessions.values_mut() {
+                                if session.pending_tool_use_id.as_deref() == Some(&tool_use_id) {
+                                    session.clear_pending();
+                                }
+                            }
+                            self.broadcast_heartbeat();
+                        }
                     }
                 }
                 _ = tick.tick() => {
@@ -923,6 +948,37 @@ mod tests {
 
         // Pending approvals map should be empty.
         assert!(agg.pending_approvals.is_empty());
+    }
+
+    #[test]
+    fn approval_timed_out_clears_pending() {
+        let mut agg = new_agg();
+
+        let (tx0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess"), tx0);
+
+        // Register a pending approval.
+        let (respond_tx, mut respond_rx) = oneshot::channel();
+        agg.handle_hook_event(pre_tool_use_event("sess", "toolu_timeout", "Bash"), respond_tx);
+
+        // Consume the AwaitDecision response (we won't use it — simulating timeout).
+        let _ = respond_rx.try_recv().unwrap();
+        assert_eq!(agg.snapshot().waiting, 1);
+        assert!(!agg.pending_approvals.is_empty());
+
+        // Simulate what the ingest handler does when the timeout fires.
+        agg.pending_approvals.remove("toolu_timeout");
+        for session in agg.sessions.values_mut() {
+            if session.pending_tool_use_id.as_deref() == Some("toolu_timeout") {
+                session.clear_pending();
+            }
+        }
+        agg.broadcast_heartbeat();
+
+        // State must be clean — no waiting, no prompt.
+        assert!(agg.pending_approvals.is_empty(), "pending approvals must be cleared");
+        assert_eq!(agg.snapshot().waiting, 0, "waiting must be 0 after timeout");
+        assert!(agg.snapshot().prompt.is_none(), "prompt must be None after timeout");
     }
 
     #[test]

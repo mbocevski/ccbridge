@@ -227,6 +227,43 @@ async fn pre_tool_use_timeout_sends_ask() {
     assert!(!reason.is_empty(), "timeout ask reason must be non-empty");
 }
 
+/// After timeout, the aggregator's pending approval is cleared so emitters
+/// (swaync, ctrl) see prompt:None / waiting:0 on the next heartbeat.
+#[tokio::test]
+async fn pre_tool_use_timeout_clears_aggregator_state() {
+    let (_dir, agg_tx, runtime_dir) = setup(Duration::from_millis(50)).await;
+    let (mut reader, mut writer) = connect(&runtime_dir).await;
+
+    let pre_tool_use = json!({
+        "session_id": "sess_timeout_state",
+        "transcript_path": "/tmp/sess_ts.jsonl",
+        "cwd": "/tmp",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo state-check"},
+        "tool_use_id": "toolu_ts_001"
+    });
+    send_line(&mut writer, &pre_tool_use).await;
+
+    // Wait for the timeout to fire and the Ask response to arrive.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let _line = recv_line(&mut reader).await.expect("should get ask response");
+
+    // Give the ApprovalTimedOut message time to be processed by the aggregator.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Query the aggregator: prompt must be gone.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    agg_tx
+        .send(ccbridged::state::AggregatorMsg::GetHeartbeat { respond: tx })
+        .await
+        .unwrap();
+    let hb = rx.await.unwrap();
+    assert_eq!(hb.waiting, 0, "waiting must be 0 after timeout");
+    assert!(hb.prompt.is_none(), "prompt must be None after timeout — emitters must not re-pop");
+}
+
 /// Malformed JSON input → connection closes cleanly, no panic.
 #[tokio::test]
 async fn malformed_json_closes_cleanly() {
