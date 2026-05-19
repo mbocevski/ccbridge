@@ -203,10 +203,12 @@ async fn run_settings_watcher(
 ///
 /// The evaluation order follows the spec:
 /// 1. `permission_mode` short-circuit — permissive modes auto-allow.
-/// 2. Deny patterns — checked first; deny wins over allow; even an ambiguous
-///    deny triggers `AskAnnotated` rather than falling through.
+/// 2. Deny patterns — confident match → `Deny`; ambiguous denies are
+///    accumulated and surface as `AskAnnotated` only if no confident deny
+///    matched later in the list.
 /// 3. Allow patterns — confident match → `Allow`; ambiguous is remembered.
-/// 4. Ambiguous allow with no confident match → `AskAnnotated`.
+/// 4. No confident match: an accumulated ambiguous deny (priority) or
+///    ambiguous allow surfaces as `AskAnnotated`.
 /// 5. Nothing matched → `Intercept`.
 pub fn evaluate(event: &PreToolUseEvent, allowlist: &Allowlist) -> Decision {
     // Step 1: permission_mode short-circuit.
@@ -488,6 +490,25 @@ mod tests {
         let al = allowlist_with(&["Skill"], &["Read(**/.env*)"]);
         let e = pre_tool_use("Bash", PermissionMode::Default, json!({"command": "echo hi"}));
         assert!(matches!(evaluate(&e, &al), Decision::Intercept));
+    }
+
+    #[test]
+    fn evaluate_ambiguous_allow_returns_decision_with_pattern() {
+        // The raw pattern string from settings.json must appear verbatim in the
+        // AskAnnotated decision so the heartbeat and notify body can display it.
+        let al = allowlist_with(&["Bash(git status:*)"], &[]);
+        // Bash event with NO command field → Ambiguous.
+        let e = pre_tool_use("Bash", PermissionMode::Default, json!({}));
+        match evaluate(&e, &al) {
+            Decision::AskAnnotated { ref matched_pattern, source } => {
+                assert_eq!(
+                    matched_pattern, "Bash(git status:*)",
+                    "matched_pattern must be the raw settings.json string"
+                );
+                assert_eq!(source, AllowOrDeny::Allow);
+            }
+            other => panic!("expected AskAnnotated, got {other:?}"),
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use ccbridge_proto::buddy::{Heartbeat, WireDecision};
+use ccbridge_proto::buddy::{Heartbeat, MatchSource, WireDecision};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 use zbus::proxy;
@@ -282,7 +282,25 @@ async fn handle_heartbeat(
 
             // A permission prompt is pending.  Post (or replace) the notification.
             let summary = format!("Claude Code: approve {}?", prompt.tool);
-            let body = prompt.hint.clone();
+
+            // Include the matched allowlist pattern in the body when present, so
+            // the user understands why ccbridge is intercepting a call they may
+            // have intended to allow or deny via their settings.json patterns.
+            let body = if let (Some(pattern), Some(source)) = (
+                prompt.matched_pattern.as_ref(),
+                prompt.matched_source.as_ref(),
+            ) {
+                let source_label = match source {
+                    MatchSource::Allow => "allowlists",
+                    MatchSource::Deny => "denies",
+                };
+                format!(
+                    "{}\n[Claude {} this with pattern {:?} — confirm to override]",
+                    prompt.hint, source_label, pattern,
+                )
+            } else {
+                prompt.hint.clone()
+            };
 
             // actions: flat list of (key, label) pairs.
             // "default" key = clicking the notification body.

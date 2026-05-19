@@ -25,7 +25,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ccbridge_proto::buddy::{Heartbeat, PromptInfo, WireDecision};
+use ccbridge_proto::buddy::{Heartbeat, MatchSource, PromptInfo, WireDecision};
 use ccbridge_proto::hook::{HookEvent, PermissionMode};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
@@ -34,6 +34,19 @@ use tracing::{debug, info, warn};
 use arc_swap::ArcSwap;
 
 use crate::permission::{AllowOrDeny, Allowlist};
+
+// ---------------------------------------------------------------------------
+// AllowOrDeny → MatchSource conversion (wire boundary)
+// ---------------------------------------------------------------------------
+
+impl From<AllowOrDeny> for MatchSource {
+    fn from(v: AllowOrDeny) -> Self {
+        match v {
+            AllowOrDeny::Allow => MatchSource::Allow,
+            AllowOrDeny::Deny => MatchSource::Deny,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public type aliases
@@ -289,6 +302,8 @@ impl Aggregator {
             id: s.pending_tool_use_id.clone().unwrap_or_default(),
             tool: s.pending_tool_name.clone().unwrap_or_default(),
             hint: s.pending_tool_hint.clone().unwrap_or_default(),
+            matched_pattern: s.pending_matched_pattern.clone(),
+            matched_source: s.pending_match_source.map(MatchSource::from),
         });
 
         let msg = if waiting > 0 {
@@ -784,6 +799,55 @@ mod tests {
         assert_eq!(prompt.id, "toolu_abc");
         assert_eq!(prompt.tool, "Bash");
         assert_eq!(prompt.hint, "echo hello");
+    }
+
+    #[test]
+    fn ask_annotated_decision_surfaces_in_snapshot() {
+        // Build an aggregator with an allowlist that produces AskAnnotated for Bash.
+        // A Bash call with no command field → Ambiguous allow → AskAnnotated.
+        let al = crate::permission::Allowlist {
+            allow: vec![crate::permission::Pattern::parse("Bash(git status:*)")],
+            deny: vec![],
+        };
+        let (mut agg, _rx) = Aggregator::new(
+            DEFAULT_APPROVAL_TIMEOUT,
+            Arc::new(ArcSwap::new(Arc::new(al))),
+        );
+
+        let (tx0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess_ann"), tx0);
+
+        // Fire PreToolUse for Bash with no command field → Ambiguous → AskAnnotated.
+        let event = HookEvent::PreToolUse(PreToolUseEvent {
+            base: HookBase {
+                session_id: "sess_ann".to_owned(),
+                transcript_path: "/tmp/ann.jsonl".to_owned(),
+                cwd: "/tmp".to_owned(),
+            },
+            permission_mode: PermissionMode::Default,
+            effort: None,
+            tool_name: "Bash".to_owned(),
+            tool_input: serde_json::json!({}), // no command → Ambiguous
+            tool_use_id: "toolu_ann_001".to_owned(),
+            agent_id: None,
+            agent_type: None,
+        });
+        let (respond_tx, _) = oneshot::channel();
+        agg.handle_hook_event(event, respond_tx);
+
+        // Snapshot must carry the annotation fields.
+        let hb = agg.snapshot();
+        assert_eq!(hb.waiting, 1);
+        let prompt = hb.prompt.expect("prompt must be present for waiting session");
+        assert_eq!(
+            prompt.matched_pattern.as_deref(),
+            Some("Bash(git status:*)"),
+            "matched_pattern must be the raw settings.json pattern string"
+        );
+        assert_eq!(
+            prompt.matched_source,
+            Some(ccbridge_proto::buddy::MatchSource::Allow),
+        );
     }
 
     #[test]

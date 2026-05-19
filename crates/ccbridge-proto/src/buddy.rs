@@ -71,6 +71,30 @@ pub struct PromptInfo {
     pub tool: String,
     /// Short hint showing what the tool intends to do.
     pub hint: String,
+
+    // Annotation fields — present only when the decision came from
+    // `permission::Decision::AskAnnotated` (i.e. the allowlist matched
+    // ambiguously).  Clients that don't know these fields ignore them.
+    // No `hello.version` bump — this is an additive extension.
+
+    /// The raw pattern string from `settings.json` that matched ambiguously
+    /// (e.g. `"Bash(git status:*)"` or `"Read(**/.env*)"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_pattern: Option<String>,
+
+    /// Which side of the allowlist the pattern came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_source: Option<MatchSource>,
+}
+
+/// Which side of the user's allowlist a pattern came from.
+///
+/// Wire values: `"allow"` or `"deny"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchSource {
+    Allow,
+    Deny,
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +397,53 @@ mod tests {
         assert_eq!(p.id, "req_abc123");
         assert_eq!(p.tool, "Bash");
         assert_eq!(p.hint, "rm -rf /tmp/foo");
+        // Annotation fields absent → both None.
+        assert!(p.matched_pattern.is_none());
+        assert!(p.matched_source.is_none());
+    }
+
+    #[test]
+    fn prompt_info_annotation_round_trip() {
+        // PromptInfo with both annotation fields populated.
+        let prompt = PromptInfo {
+            id: "req_ann".to_owned(),
+            tool: "Bash".to_owned(),
+            hint: "git status".to_owned(),
+            matched_pattern: Some("Bash(git status:*)".to_owned()),
+            matched_source: Some(MatchSource::Allow),
+        };
+        let v = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(v["matched_pattern"], "Bash(git status:*)");
+        assert_eq!(v["matched_source"], "allow");
+        // Round-trip
+        let p2: PromptInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(p2.matched_pattern.as_deref(), Some("Bash(git status:*)"));
+        assert_eq!(p2.matched_source, Some(MatchSource::Allow));
+    }
+
+    #[test]
+    fn prompt_info_annotation_fields_omitted_when_none() {
+        // When annotation fields are None, they must be absent from the JSON
+        // (skip_serializing_if = "Option::is_none") so old clients see no
+        // unexpected keys.
+        let prompt = PromptInfo {
+            id: "req_no_ann".to_owned(),
+            tool: "Bash".to_owned(),
+            hint: "echo hi".to_owned(),
+            matched_pattern: None,
+            matched_source: None,
+        };
+        let v = serde_json::to_value(&prompt).unwrap();
+        assert!(v.get("matched_pattern").is_none(), "matched_pattern must be absent");
+        assert!(v.get("matched_source").is_none(), "matched_source must be absent");
+    }
+
+    #[test]
+    fn match_source_deny_serialises_lowercase() {
+        let v = serde_json::to_value(MatchSource::Deny).unwrap();
+        assert_eq!(v, "deny");
+        let v = serde_json::to_value(MatchSource::Allow).unwrap();
+        assert_eq!(v, "allow");
     }
 
     #[test]
