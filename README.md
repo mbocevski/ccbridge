@@ -4,14 +4,14 @@ ccbridge is a background daemon for Linux that hooks into Claude Code and
 aggregates state across all running sessions. When a tool call needs your
 approval, it surfaces a dismissable notification via swaync (or any
 freedesktop-compatible notification daemon: mako, dunst, GNOME, KDE) with
-Approve and Deny actions so you can decide without switching windows. A bidirectional
-control socket lets any script or TUI read live session state — token counts,
-running/waiting counts, current approval prompt — and send decisions back.
+Approve and Deny actions so you can decide without switching windows. A
+bidirectional control socket lets any script or TUI read live session state —
+token counts, running/waiting counts, current approval prompt — and send
+decisions back.
 
 **v1 scope:** Arch Linux only (install via PKGBUILD), freedesktop notifications
-(swaync is the canonical example, but mako, dunst, GNOME, and KDE all work) and
-control socket. A BLE bridge to claude-desktop-buddy hardware is planned for
-v2 — the control socket already speaks the buddy wire protocol, so a BLE
+and control socket. A BLE bridge to claude-desktop-buddy hardware is planned
+for v2 — the control socket already speaks the buddy wire protocol, so a BLE
 bridge can live as a separate process that connects to ctrl.sock.
 
 ## Install
@@ -32,26 +32,34 @@ is safe.
 ## What you'll see
 
 When Claude Code is about to run a tool that needs approval, a critical
-notification appears (via swaync, mako, dunst, GNOME, KDE, or any
-freedesktop-compatible daemon) with the tool name and input hint. Click **Approve** to
-allow it or **Deny** to block it. If you ignore the notification, the approval
-timeout expires and Claude Code falls back to its own built-in TUI prompt.
+notification appears with the tool name and input hint. Click **Approve** to
+allow it or **Deny** to block it. If you ignore the notification, the
+approval timeout expires and Claude Code falls back to its own built-in TUI
+prompt (configurable — see `fallback` in Configuration below).
 
-If the daemon is not running — or crashes — Claude Code behaves exactly as if
+ccbridge respects `permissions.allow` and `permissions.deny` entries in
+`~/.claude/settings.json`. Tool calls that confidently match an allow-list
+pattern are auto-approved without a notification; those matching a deny-list
+pattern are hard-denied. Ambiguous or unrecognised patterns are surfaced with
+an annotation explaining which pattern triggered the intercept. See
+[docs/permission-handling.md](docs/permission-handling.md) for the full
+decision logic.
+
+If the daemon is not running or crashes, Claude Code behaves exactly as if
 ccbridge were not installed. The hook binary exits 0 with no output on any
-error; daemon-down is never a Claude Code outage.
+error — daemon-down is never a Claude Code outage.
 
 ## Control socket
 
 The control socket at `$XDG_RUNTIME_DIR/ccbridge/ctrl.sock` is a
-newline-delimited JSON stream. Connect with socat for quick inspection:
+newline-delimited JSON stream. Quick inspection:
 
 ```sh
 socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/ccbridge/ctrl.sock
 ```
 
 On connect you receive a `hello` message and a full heartbeat snapshot, then
-a stream of heartbeat updates. To subscribe explicitly:
+a stream of heartbeat updates (subscribe first to keep receiving them):
 
 ```json
 {"cmd": "subscribe", "topics": ["heartbeat", "turn"]}
@@ -88,16 +96,27 @@ Then add a custom module to `~/.config/waybar/config`:
 ```
 
 `GET /status` returns the full heartbeat JSON snapshot (same shape as the
-ctrl-socket heartbeat).  Only `GET /status` is served; everything else returns
+ctrl-socket heartbeat). Only `GET /status` is served; everything else returns
 404.
 
 ## Configuration
 
-ccbridge reads `$XDG_CONFIG_HOME/ccbridge/config.toml` (defaults to
-`~/.config/ccbridge/config.toml`). The config loader is not yet implemented
-(task `8564c3f5`); all values are hardcoded defaults for now. The file is
-reserved for future knobs such as approval timeout and which emitters are
-enabled.
+ccbridge reads `$XDG_CONFIG_HOME/ccbridge/config.toml`
+(defaults to `~/.config/ccbridge/config.toml`).
+See [docs/example-config.toml](docs/example-config.toml) for the full
+reference with all knobs and their defaults. The most likely things to tune:
+
+| Key | Default | What it does |
+|-----|---------|--------------|
+| `approvals.timeout_ms` | `30000` | ms to wait for a decision before falling back |
+| `approvals.fallback` | `"passthrough"` | `"passthrough"`, `"deny"`, or `"allow"` |
+| `emit.notify.enabled` | `true` | Enable freedesktop desktop notifications |
+| `emit.http.enabled` | `false` | Enable HTTP `/status` endpoint (Waybar) |
+| `emit.http.addr` | `"127.0.0.1:9876"` | Address for the HTTP endpoint |
+
+To apply a config change: edit the file and restart the daemon
+(`systemctl --user restart ccbridge`). There is no hot-reload for
+`config.toml`; only `settings.json` allowlist changes are picked up live.
 
 ## Troubleshooting
 
@@ -113,21 +132,30 @@ journalctl --user -u ccbridge -f
 ccbridged setup
 ```
 
-Safe to run repeatedly: missing hooks are added; existing hook entries are not
+Safe to run repeatedly: missing hooks are added; existing entries are not
 modified.
 
-**Daemon not starting?** Verify the package is installed and the service unit
-is in place:
+**Daemon not starting?** Verify the package and unit are in place:
 
 ```sh
 pacman -Ql ccbridge-git | grep ccbridge.service
 systemctl --user status ccbridge
 ```
 
+**Edited `settings.json` and the allowlist didn't update?** ccbridge watches
+`~/.claude/settings.json` and reloads the allowlist on change. Reload should
+happen within ~100ms of saving the file. Check the logs for the reload event:
+
+```sh
+journalctl --user -u ccbridge | grep "allowlist"
+```
+
+If the "reloaded allowlist" line never appears, restart the daemon manually:
+`systemctl --user restart ccbridge`.
+
 **Claude Code broken after installing ccbridge?** That should not happen — the
 hook binary exits 0 silently on any error. If you suspect a regression, remove
-the hook entries from `~/.claude/settings.json` (the `hooks` key) and file an
-issue.
+the `hooks` key from `~/.claude/settings.json` and file an issue.
 
 ## License
 
