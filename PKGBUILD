@@ -1,6 +1,6 @@
 # Maintainer: Marko Bocevski <marko.bocevski@gmail.com>
 pkgname=ccbridge-git
-pkgver=r6.g0d5b22a
+pkgver=r15.g2778221
 pkgrel=1
 pkgdesc="Claude Code hook aggregator — bridges Claude Code sessions to BLE/swaync/HTTP emitters"
 arch=('x86_64')
