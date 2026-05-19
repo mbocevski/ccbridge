@@ -1,7 +1,6 @@
 [Unit]
 Description=ccbridge — Claude Code hook aggregator
 Documentation=https://github.com/mbocevski/ccbridge
-After=default.target
 
 [Service]
 Type=notify
