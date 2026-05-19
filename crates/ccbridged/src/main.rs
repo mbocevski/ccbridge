@@ -51,7 +51,7 @@ fn main() {
 }
 
 async fn daemon_main(tz_offset: i32) -> Result<()> {
-    use ccbridged::emit::{ctrl as ctrl_emit, notify as notify_emit};
+    use ccbridged::emit::{ctrl as ctrl_emit, http as http_emit, notify as notify_emit};
     use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
     use arc_swap::ArcSwap;
     use ccbridged::permission::{settings_path, spawn_settings_watcher, Allowlist};
@@ -164,7 +164,27 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         notify_emit::spawn(agg_tx.clone(), hb_rx.resubscribe());
     }
     if config.emit.ctrl.enabled {
-        ctrl_emit::spawn(runtime_dir, agg_tx, hb_rx, owner, tz_offset);
+        ctrl_emit::spawn(runtime_dir, agg_tx.clone(), hb_rx, owner, tz_offset);
+    }
+    if config.emit.http.enabled {
+        match config.emit.http.addr.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                match http_emit::spawn(agg_tx.clone(), addr).await {
+                    Ok((_, bound)) => {
+                        info!(addr = %bound, "http: /status endpoint enabled");
+                    }
+                    Err(e) => {
+                        tracing::warn!("http: {e:#} — disabling HTTP endpoint");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "http: cannot parse addr {:?}: {e} — disabling HTTP endpoint",
+                    config.emit.http.addr,
+                );
+            }
+        }
     }
 
     info!("ccbridged ready");

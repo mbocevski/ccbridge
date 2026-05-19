@@ -7,4 +7,5 @@
 #[cfg(feature = "ble")]
 pub mod ble;
 pub mod ctrl;
+pub mod http;
 pub mod notify;

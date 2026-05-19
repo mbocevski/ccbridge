@@ -64,8 +64,32 @@ To approve or deny a pending tool call:
 {"cmd": "permission", "id": "<tool_use_id>", "decision": "deny"}
 ```
 
-Full protocol reference: [docs/control-protocol.md](docs/control-protocol.md)
-(documentation task in progress).
+Full protocol reference: [docs/control-protocol.md](docs/control-protocol.md).
+
+## Waybar integration
+
+Enable the optional HTTP endpoint in `~/.config/ccbridge/config.toml`:
+
+```toml
+[emit.http]
+enabled = true
+addr = "127.0.0.1:9876"
+```
+
+Then add a custom module to `~/.config/waybar/config`:
+
+```jsonc
+"custom/ccbridge": {
+    "format": "{} 󱙯",
+    "interval": 10,
+    "exec": "curl -sf http://127.0.0.1:9876/status | jq -r '\"\\(.tokens_today) toks\"' 2>/dev/null || echo '-'",
+    "tooltip": false
+}
+```
+
+`GET /status` returns the full heartbeat JSON snapshot (same shape as the
+ctrl-socket heartbeat).  Only `GET /status` is served; everything else returns
+404.
 
 ## Configuration
 
