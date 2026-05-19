@@ -524,24 +524,79 @@ async fn close_all(proxy: &NotificationsProxy<'_>, active: &mut HashMap<u32, Str
 // Session context helpers
 // ---------------------------------------------------------------------------
 
-/// Shorten a cwd path to the last 2 components for compact display.
+/// Maximum number of display characters before truncating with `…`.
+const MAX_DISPLAY_LEN: usize = 30;
+
+/// Shorten a cwd path for compact display in notification bodies.
 ///
-/// ```
-/// # use ccbridged::emit::notify::shorten_cwd;
-/// assert_eq!(shorten_cwd("/home/user/dev/ccbridge"), "dev/ccbridge");
-/// assert_eq!(shorten_cwd("/tmp"),                   "tmp");
-/// assert_eq!(shorten_cwd(""),                       "");
-/// assert_eq!(shorten_cwd("/"),                      "");
-/// ```
+/// - Replaces `$HOME` prefix with `~` (e.g. `/home/u/dev/x` → `~/dev/x`).
+/// - Leaves short absolute paths intact (e.g. `/tmp/new` → `/tmp/new`).
+/// - Truncates only when the result would be ≥ [`MAX_DISPLAY_LEN`] chars,
+///   replacing the middle with `…`.
+/// - Empty string → empty string.
+///
+/// Delegates to [`shorten_cwd_with_home`] using the process `$HOME`.
 pub fn shorten_cwd(cwd: &str) -> String {
-    let p = std::path::Path::new(cwd);
+    let home = std::env::var_os("HOME")
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    shorten_cwd_with_home(cwd, &home)
+}
+
+/// Testable inner implementation — accepts `home` as a parameter so tests
+/// don't need to mutate process environment.
+pub fn shorten_cwd_with_home(cwd: &str, home: &str) -> String {
+    if cwd.is_empty() {
+        return String::new();
+    }
+
+    // Substitute $HOME prefix with ~.  Guard against partial matches by
+    // ensuring the char after the home prefix (if any) is '/'.
+    let displayed: String = if !home.is_empty() {
+        let home_trailing_slash = if home.ends_with('/') {
+            home.to_owned()
+        } else {
+            format!("{home}/")
+        };
+        if cwd == home {
+            // Exact match — the path IS $HOME.
+            "~".to_owned()
+        } else if cwd.starts_with(home_trailing_slash.as_str()) {
+            // Starts with "$HOME/" — substitute prefix.
+            let rest = &cwd[home.len()..]; // includes the leading '/'
+            format!("~{rest}")
+        } else {
+            cwd.to_owned()
+        }
+    } else {
+        cwd.to_owned()
+    };
+
+    // Already short enough? Return as-is.
+    if displayed.len() <= MAX_DISPLAY_LEN {
+        return displayed;
+    }
+
+    // Too long — keep the prefix anchor (~/ or /) and the last 2 components.
+    let p = std::path::Path::new(&displayed);
     let comps: Vec<&str> = p
         .components()
         .filter_map(|c| c.as_os_str().to_str())
         .filter(|s| !s.is_empty() && *s != "/")
         .collect();
-    let n = comps.len().min(2);
-    comps[comps.len() - n..].join("/")
+
+    if comps.len() <= 2 {
+        return displayed; // can't truncate further; return as-is
+    }
+
+    let tail: Vec<&str> = comps.iter().rev().take(2).rev().copied().collect();
+    let tail_str = tail.join("/");
+
+    if displayed.starts_with('~') {
+        format!("~/…/{tail_str}")
+    } else {
+        format!("/…/{tail_str}")
+    }
 }
 
 /// Return the first 6 characters of a session UUID (git-SHA style).
@@ -554,15 +609,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shorten_cwd_basics() {
-        assert_eq!(shorten_cwd("/home/user/dev/ccbridge"), "dev/ccbridge");
-        assert_eq!(shorten_cwd("/tmp"), "tmp");
-        assert_eq!(shorten_cwd(""), "");
-        assert_eq!(shorten_cwd("/"), "");
-        // Only one non-root component.
-        assert_eq!(shorten_cwd("/home"), "home");
-        // Three or more components: take last 2.
-        assert_eq!(shorten_cwd("/a/b/c/d"), "c/d");
+    fn shorten_cwd_replaces_home_with_tilde() {
+        assert_eq!(shorten_cwd_with_home("/home/u/dev/x", "/home/u"), "~/dev/x");
+        assert_eq!(shorten_cwd_with_home("/home/u",        "/home/u"), "~");
+        assert_eq!(shorten_cwd_with_home("/home/u/x",      "/home/u"), "~/x");
+    }
+
+    #[test]
+    fn shorten_cwd_keeps_short_absolute_paths() {
+        assert_eq!(shorten_cwd_with_home("/tmp/new", "/home/u"), "/tmp/new");
+        assert_eq!(shorten_cwd_with_home("/srv",     "/home/u"), "/srv");
+        assert_eq!(shorten_cwd_with_home("/",        "/home/u"), "/");
+    }
+
+    #[test]
+    fn shorten_cwd_truncates_long_home_paths() {
+        let long = "/home/u/dev/aiven/aiven-design-system/very/deep";
+        let out = shorten_cwd_with_home(long, "/home/u");
+        assert!(out.starts_with("~/…/"), "expected ~/…/... got {out:?}");
+        assert!(out.contains("very/deep"), "expected tail very/deep, got {out:?}");
+    }
+
+    #[test]
+    fn shorten_cwd_truncates_long_absolute_paths() {
+        let long = "/var/lib/postgres/data/very/deep/path";
+        let out = shorten_cwd_with_home(long, "/home/u");
+        assert!(out.starts_with("/…/"), "expected /…/... got {out:?}");
+        assert!(out.contains("deep/path"), "expected tail deep/path, got {out:?}");
+    }
+
+    #[test]
+    fn shorten_cwd_empty_path() {
+        assert_eq!(shorten_cwd_with_home("", "/home/u"), "");
+    }
+
+    #[test]
+    fn shorten_cwd_no_home_env_var() {
+        // When home is empty, paths under what would normally be home stay absolute.
+        assert_eq!(shorten_cwd_with_home("/home/u/dev/x", ""), "/home/u/dev/x");
+    }
+
+    #[test]
+    fn shorten_cwd_partial_home_match_not_substituted() {
+        // /home/used must NOT match /home/u — substring vs prefix.
+        let out = shorten_cwd_with_home("/home/used/x", "/home/u");
+        assert!(!out.starts_with('~'), "partial prefix must not substitute ~, got {out:?}");
+        assert_eq!(out, "/home/used/x");
+    }
+
+    // Regression for the original shorten_cwd_basics — now rendered differently.
+    #[test]
+    fn shorten_cwd_root_returns_slash() {
+        assert_eq!(shorten_cwd_with_home("/", "/home/u"), "/");
     }
 
     #[test]
