@@ -159,13 +159,17 @@ pub struct PermissionCmd {
     pub cmd: String,
     /// Must match [`PromptInfo::id`] exactly.
     pub id: String,
-    pub decision: PermissionDecision,
+    pub decision: WireDecision,
 }
 
-/// The two decisions a device can send.
+/// The two permission decisions a BLE device (or control-socket client) can send.
+///
+/// Named `WireDecision` (not `PermissionDecision`) to avoid confusion with
+/// [`hook::PermissionDecision`], which carries the hook-stdout values
+/// `allow|deny|ask` — a different semantic domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PermissionDecision {
+pub enum WireDecision {
     /// Approve this tool call once.
     Once,
     /// Deny this tool call.
@@ -179,20 +183,21 @@ pub enum PermissionDecision {
 /// Any command a BLE device (or control-socket client) can send.
 ///
 /// Uses an internally-tagged `"cmd"` field.
+///
+/// Note: `{"cmd":"owner","name":"…"}` is **desktop → device only** — see
+/// [`OwnerMessage`].  Devices never send an `owner` command back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum DeviceCommand {
     /// `{"cmd":"permission","id":"…","decision":"once"|"deny"}`
     Permission {
         id: String,
-        decision: PermissionDecision,
+        decision: WireDecision,
     },
     /// `{"cmd":"status"}` — polls the daemon for a [`StatusAck`].
     Status,
-    /// `{"cmd":"name","name":"Clawd"}` — sets the device display name.
+    /// `{"cmd":"name","name":"Clawd"}` — sets the device's own display name.
     Name { name: String },
-    /// `{"cmd":"owner","name":"Felix"}` — sets/confirms the owner name.
-    Owner { name: String },
     /// `{"cmd":"unpair"}` — erase stored BLE bonds.
     Unpair,
 }
@@ -377,7 +382,7 @@ mod tests {
         match cmd {
             DeviceCommand::Permission { id, decision } => {
                 assert_eq!(id, "req_abc123");
-                assert_eq!(decision, PermissionDecision::Once);
+                assert_eq!(decision, WireDecision::Once);
             }
             _ => panic!("wrong variant"),
         }
@@ -389,7 +394,7 @@ mod tests {
         let cmd: DeviceCommand = serde_json::from_value(raw).unwrap();
         match cmd {
             DeviceCommand::Permission { decision, .. } => {
-                assert_eq!(decision, PermissionDecision::Deny);
+                assert_eq!(decision, WireDecision::Deny);
             }
             _ => panic!("wrong variant"),
         }

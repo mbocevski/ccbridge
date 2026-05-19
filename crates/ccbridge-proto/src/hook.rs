@@ -102,9 +102,15 @@ pub enum SessionSource {
 /// let event: HookEvent = serde_json::from_str(&stdin_line)?;
 /// match event {
 ///     HookEvent::PreToolUse(e) => { … }
+///     HookEvent::Unknown => { /* forward-compat: log and skip */ }
 ///     _ => {}
 /// }
 /// ```
+///
+/// The `Unknown` unit variant catches any `hook_event_name` values not listed
+/// here (e.g. new hooks added in future Claude Code versions).  serde's
+/// internal-tag `#[serde(other)]` only works on unit variants; that is fine
+/// because the daemon never needs to inspect the payload of an unknown event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "hook_event_name")]
 pub enum HookEvent {
@@ -113,10 +119,16 @@ pub enum HookEvent {
     Notification(NotificationEvent),
     Stop(StopEvent),
     SessionStart(SessionStartEvent),
+    UserPromptSubmit(UserPromptSubmitEvent),
+    SessionEnd(SessionEndEvent),
+    /// Forward-compatibility catch-all: any unknown `hook_event_name` value.
+    /// The daemon must log and skip these rather than crash.
+    #[serde(other)]
+    Unknown,
 }
 
 impl HookEvent {
-    /// The session ID present on every variant.
+    /// The session ID present on every known variant, or `""` for `Unknown`.
     pub fn session_id(&self) -> &str {
         match self {
             HookEvent::PreToolUse(e) => &e.base.session_id,
@@ -124,6 +136,9 @@ impl HookEvent {
             HookEvent::Notification(e) => &e.base.session_id,
             HookEvent::Stop(e) => &e.base.session_id,
             HookEvent::SessionStart(e) => &e.base.session_id,
+            HookEvent::UserPromptSubmit(e) => &e.base.session_id,
+            HookEvent::SessionEnd(e) => &e.base.session_id,
+            HookEvent::Unknown => "",
         }
     }
 }
@@ -259,6 +274,39 @@ pub struct SessionStartEvent {
 }
 
 // ---------------------------------------------------------------------------
+// UserPromptSubmit
+// ---------------------------------------------------------------------------
+
+/// Fires when the user submits a prompt.  Can inject additional context or
+/// block submission (exit 2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPromptSubmitEvent {
+    #[serde(flatten)]
+    pub base: HookBase,
+
+    pub permission_mode: PermissionMode,
+
+    /// The text the user submitted.
+    pub prompt: String,
+}
+
+// ---------------------------------------------------------------------------
+// SessionEnd
+// ---------------------------------------------------------------------------
+
+/// Fires when a session ends.  Non-blocking — cannot prevent session end.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionEndEvent {
+    #[serde(flatten)]
+    pub base: HookBase,
+
+    /// Why the session ended.  Known values: `clear`, `resume`, `logout`,
+    /// `prompt_input_exit`, `bypass_permissions_disabled`, `other`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Hook stdout response shapes
 // ---------------------------------------------------------------------------
 
@@ -291,13 +339,22 @@ pub struct PreToolUseOutput {
 }
 
 /// Decision the hook returns for a `PreToolUse` event.
+///
+/// Values documented at <https://code.claude.com/docs/en/hooks>:
+/// - `allow` — approve this tool call
+/// - `deny`  — reject this tool call
+/// - `ask`   — surface a prompt to the user
+///
+/// **`passthrough` / "defer" is NOT a decision value.** When the daemon wants
+/// to fall back to Claude Code's own TUI prompt it exits 0 with no stdout
+/// (i.e. no `hookSpecificOutput` at all).  That is handled in the hook binary
+/// logic, not via this enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionDecision {
     Allow,
     Deny,
     Ask,
-    Defer,
 }
 
 #[cfg(test)]
@@ -416,5 +473,67 @@ mod tests {
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+        // Defer is gone — only allow|deny|ask are valid
+        let decisions = ["allow", "deny", "ask"];
+        for d in decisions {
+            let pd: PermissionDecision = serde_json::from_str(&format!("\"{}\"", d)).unwrap();
+            assert_eq!(serde_json::to_value(&pd).unwrap(), d);
+        }
+    }
+
+    #[test]
+    fn round_trip_user_prompt_submit() {
+        let raw = json!({
+            "session_id": "sess_06",
+            "transcript_path": "/tmp/sess_06.jsonl",
+            "cwd": "/tmp",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Write a factorial function"
+        });
+        let evt: HookEvent = serde_json::from_value(raw).unwrap();
+        match &evt {
+            HookEvent::UserPromptSubmit(e) => {
+                assert_eq!(e.prompt, "Write a factorial function");
+                assert_eq!(e.base.session_id, "sess_06");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn round_trip_session_end() {
+        let raw = json!({
+            "session_id": "sess_07",
+            "transcript_path": "/tmp/sess_07.jsonl",
+            "cwd": "/tmp",
+            "hook_event_name": "SessionEnd",
+            "reason": "logout"
+        });
+        let evt: HookEvent = serde_json::from_value(raw).unwrap();
+        match &evt {
+            HookEvent::SessionEnd(e) => {
+                assert_eq!(e.reason.as_deref(), Some("logout"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn unknown_event_name_deserialises_to_unknown_variant() {
+        // Future Claude Code versions may add new hook events. We must not crash.
+        let raw = json!({
+            "session_id": "sess_08",
+            "transcript_path": "/tmp/sess_08.jsonl",
+            "cwd": "/tmp",
+            "hook_event_name": "PreCompact",
+            "some_future_field": 42
+        });
+        let evt: HookEvent = serde_json::from_value(raw).unwrap();
+        assert!(
+            matches!(evt, HookEvent::Unknown),
+            "expected Unknown variant for unrecognised hook_event_name"
+        );
+        assert_eq!(evt.session_id(), "");
     }
 }
