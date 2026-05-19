@@ -42,6 +42,8 @@ futures-lite = "2"
 notify = "6"
 # Local time for daily reset (daemon-specific)
 time = { version = "0.3", features = ["local-offset", "macros", "formatting"] }
+# Signal Type=notify readiness to systemd. Tiny crate, no transitives.
+sd-notify = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

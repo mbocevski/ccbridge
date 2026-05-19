@@ -72,6 +72,12 @@ async fn daemon_main() -> Result<()> {
 
     info!("ccbridged ready");
 
+    // Tell systemd we're ready (Type=notify in the unit file).
+    // Best-effort: under non-systemd contexts (cargo run) this is a no-op.
+    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+        tracing::debug!("sd_notify ready failed (not running under systemd?): {e}");
+    }
+
     tokio::signal::ctrl_c().await?;
     info!("ccbridged shutting down");
     Ok(())
