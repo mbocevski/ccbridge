@@ -31,11 +31,6 @@
 use anyhow::Result;
 use tracing::info;
 
-mod config;
-mod emit;
-mod ingest;
-mod state;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()

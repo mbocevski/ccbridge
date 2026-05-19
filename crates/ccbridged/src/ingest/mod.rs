@@ -1,6 +1,6 @@
-//! Hook ingest + JSONL tail stubs.
-//! Hook ingest: task 362c957e.
-//! JSONL tail:  task 27993d8d.
+//! Hook ingest + JSONL tail.
+//! Hook ingest: task 362c957e (implemented).
+//! JSONL tail:  task 27993d8d (stub).
 
 pub mod hooks;
 pub mod jsonl;

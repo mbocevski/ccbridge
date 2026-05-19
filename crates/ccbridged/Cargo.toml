@@ -7,6 +7,10 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[lib]
+name = "ccbridged"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ccbridged"
 path = "src/main.rs"
