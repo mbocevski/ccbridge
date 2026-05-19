@@ -4,10 +4,10 @@ ccbridge is a background daemon for Linux that hooks into Claude Code and
 aggregates state across all running sessions. When a tool call needs your
 approval, it surfaces a dismissable notification via swaync (or any
 freedesktop-compatible notification daemon: mako, dunst, GNOME, KDE) with
-Approve and Deny actions so you can decide without switching windows. A
-bidirectional control socket lets any script or TUI read live session state —
-token counts, running/waiting counts, current approval prompt — and send
-decisions back.
+Approve / Deny / Always actions so you can decide without switching windows.
+A bidirectional control socket lets any script or TUI read live session
+state — token counts, running/waiting counts, current approval prompt — and
+send decisions back.
 
 **v1 scope:** Arch Linux only (install via PKGBUILD), freedesktop notifications
 and control socket. A BLE bridge to claude-desktop-buddy hardware is planned
@@ -54,13 +54,20 @@ If you ignore the notification, the approval timeout expires and Claude Code
 falls back to its own built-in TUI prompt (configurable — see `fallback` in
 Configuration below).
 
-ccbridge respects `permissions.allow` and `permissions.deny` entries in
-`~/.claude/settings.json`. Tool calls that confidently match an allow-list
-pattern are auto-approved without a notification; those matching a deny-list
-pattern are hard-denied. Ambiguous or unrecognised patterns are surfaced with
-an annotation in the notification body explaining which pattern triggered the
-intercept. Run `journalctl --user -u ccbridge | grep allowlist` to see which
-decisions the daemon is making in real time.
+ccbridge respects `permissions.allow` and `permissions.deny` entries from
+three files, cascaded in this order:
+
+1. `<project>/.claude/settings.local.json` (project-local, gitignored) — where
+   Always writes
+2. `<project>/.claude/settings.json` (project-local, checked in)
+3. `~/.claude/settings.json` (user-global, your own config)
+
+Tool calls that confidently match an allow-list pattern are auto-approved
+without a notification; those matching a deny-list pattern are hard-denied
+(deny still wins overall when the same call matches both lists). Ambiguous
+or unrecognised patterns are surfaced with an annotation in the notification
+body explaining which pattern triggered the intercept. Each file is hot-reloaded
+on change — edit any of them and the next tool call sees the new rules.
 
 If the daemon is not running or crashes, Claude Code behaves exactly as if
 ccbridge were not installed. The hook binary exits 0 with no output on any
@@ -159,15 +166,16 @@ pacman -Ql ccbridge-git | grep ccbridge.service
 systemctl --user status ccbridge
 ```
 
-**Edited `settings.json` and the allowlist didn't update?** ccbridge watches
-`~/.claude/settings.json` and reloads the allowlist on change. Reload should
-happen within ~100ms of saving the file. Check the logs for the reload event:
+**Edited a settings file and the allowlist didn't update?** ccbridge watches
+`~/.claude/settings.json` and the per-project files (`<project>/.claude/settings.json`
+and `settings.local.json`) and reloads the allowlist on change. Reload should
+happen within ~100 ms of saving. Check the logs:
 
 ```sh
-journalctl --user -u ccbridge | grep "allowlist"
+journalctl --user -u ccbridge | grep "reloaded allowlist"
 ```
 
-If the "reloaded allowlist" line never appears, restart the daemon manually:
+If the line never appears, restart the daemon manually:
 `systemctl --user restart ccbridge`.
 
 **Claude Code broken after installing ccbridge?** That should not happen — the

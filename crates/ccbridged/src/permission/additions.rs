@@ -90,8 +90,8 @@ pub enum WriteTarget {
 ///   `~/.claude/settings.local.json` — alongside (not on top of) the
 ///   user's own `settings.json`.
 pub fn resolve_write_target(cwd: &std::path::Path) -> WriteTarget {
-    let root = crate::permission::project::find_project_root(cwd)
-        .unwrap_or_else(|| cwd.to_path_buf());
+    let root =
+        crate::permission::project::find_project_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     WriteTarget::ProjectLocal { root }
 }
 
