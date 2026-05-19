@@ -34,6 +34,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+# DBus session-bus client for swaync notifications (tokio feature; default drops smol/async-io)
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# StreamExt for zbus signal streams (already a transitive dep via zbus/futures-lite)
+futures-lite = "2"
 # JSONL tail filesystem watcher (daemon-specific, not shared via workspace)
 notify = "6"
 # Local time for daily reset (daemon-specific)
