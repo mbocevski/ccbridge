@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ccbridge_proto::buddy::{Heartbeat, MatchSource, PromptInfo, WireDecision};
-use ccbridge_proto::hook::{HookEvent, PermissionMode};
+use ccbridge_proto::hook::HookEvent;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
