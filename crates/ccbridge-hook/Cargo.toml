@@ -12,10 +12,9 @@ name = "ccbridge-hook"
 path = "src/main.rs"
 
 [dependencies]
-ccbridge-proto = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
+# Pure std — no external dependencies.  Keeps the binary small (<500 KB
+# stripped) and cold-start fast (<5 ms).  No tokio: synchronous I/O is
+# sufficient for a short-lived shim.
 
-# Note: intentionally no tokio — the hook must be synchronous and <5ms cold-start.
-# Full implementation: packaging task (not owned by core agent).
+[dev-dependencies]
+tempfile = "3"
