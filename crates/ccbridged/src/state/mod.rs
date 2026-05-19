@@ -181,6 +181,10 @@ pub struct Session {
     pub pending_matched_pattern: Option<String>,
     /// Phase 2+: which side of the allowlist the matched pattern came from.
     pub pending_match_source: Option<AllowOrDeny>,
+    /// Agent type from the hook event (`agent_type` field); `None` for
+    /// top-level sessions.  Surfaced in the heartbeat `PromptInfo` to
+    /// disambiguate sub-agent prompts from main-session prompts.
+    pub pending_agent_type: Option<String>,
 }
 
 impl Session {
@@ -195,6 +199,7 @@ impl Session {
             pending_tool_hint: None,
             pending_matched_pattern: None,
             pending_match_source: None,
+            pending_agent_type: None,
         }
     }
 
@@ -206,6 +211,7 @@ impl Session {
         self.pending_tool_hint = None;
         self.pending_matched_pattern = None;
         self.pending_match_source = None;
+        self.pending_agent_type = None;
     }
 }
 
@@ -325,6 +331,10 @@ impl Aggregator {
             hint: s.pending_tool_hint.clone().unwrap_or_default(),
             matched_pattern: s.pending_matched_pattern.clone(),
             matched_source: s.pending_match_source.map(MatchSource::from),
+            // Session/agent context — always populated when a prompt is waiting.
+            session_id: Some(s.id.clone()),
+            cwd: Some(s.cwd.clone()),
+            agent_type: s.pending_agent_type.clone(),
         });
 
         let msg = if waiting > 0 {
@@ -534,6 +544,7 @@ impl Aggregator {
         session.pending_tool_use_id = Some(e.tool_use_id.clone());
         session.pending_tool_name = Some(e.tool_name.clone());
         session.pending_tool_hint = Some(hint);
+        session.pending_agent_type = e.agent_type.clone();
         if let Some((pattern, source)) = annotation {
             session.pending_matched_pattern = Some(pattern);
             session.pending_match_source = Some(source);
@@ -887,6 +898,81 @@ mod tests {
         assert_eq!(
             prompt.matched_source,
             Some(ccbridge_proto::buddy::MatchSource::Allow),
+        );
+    }
+
+    #[test]
+    fn snapshot_includes_session_id_and_cwd() {
+        // Bare PreToolUse (default permission mode): snapshot must carry
+        // session_id and cwd in PromptInfo.
+        let mut agg = new_agg();
+
+        let (tx0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess-cwd"), tx0);
+
+        let (respond_tx, _) = oneshot::channel();
+        agg.handle_hook_event(
+            pre_tool_use_event("sess-cwd", "toolu_cwd_01", "Bash"),
+            respond_tx,
+        );
+
+        let hb = agg.snapshot();
+        let prompt = hb.prompt.expect("prompt must be set");
+        // session_id is the UUID-like session identifier used internally.
+        assert_eq!(
+            prompt.session_id.as_deref(),
+            Some("sess-cwd"),
+            "session_id must be populated in PromptInfo"
+        );
+        // cwd comes from HookBase; the test helper uses "/tmp".
+        assert_eq!(
+            prompt.cwd.as_deref(),
+            Some("/tmp"),
+            "cwd must be populated in PromptInfo"
+        );
+        // No agent_type in the test helper.
+        assert!(
+            prompt.agent_type.is_none(),
+            "agent_type must be None for a top-level session"
+        );
+    }
+
+    #[test]
+    fn start_intercept_captures_agent_type() {
+        // When a PreToolUse event carries agent_type, it must appear in snapshot.
+        let mut agg = new_agg();
+
+        let (tx0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess-agent"), tx0);
+
+        // Fire PreToolUse with agent_type set.
+        let event = HookEvent::PreToolUse(PreToolUseEvent {
+            base: HookBase {
+                session_id: "sess-agent".to_owned(),
+                transcript_path: "/tmp/agent.jsonl".to_owned(),
+                cwd: "/home/user/dev/project".to_owned(),
+            },
+            permission_mode: PermissionMode::Default,
+            effort: None,
+            tool_name: "Bash".to_owned(),
+            tool_input: serde_json::json!({"command": "echo agent"}),
+            tool_use_id: "toolu_agent_01".to_owned(),
+            agent_id: Some("core@ccbridge".to_owned()),
+            agent_type: Some("general-purpose".to_owned()),
+        });
+        let (respond_tx, _) = oneshot::channel();
+        agg.handle_hook_event(event, respond_tx);
+
+        let hb = agg.snapshot();
+        let prompt = hb.prompt.expect("prompt must be set");
+        assert_eq!(
+            prompt.agent_type.as_deref(),
+            Some("general-purpose"),
+            "agent_type must be captured from the PreToolUse event"
+        );
+        assert_eq!(
+            prompt.session_id.as_deref(),
+            Some("sess-agent"),
         );
     }
 

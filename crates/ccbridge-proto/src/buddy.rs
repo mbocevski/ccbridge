@@ -86,6 +86,24 @@ pub struct PromptInfo {
     /// Which side of the allowlist the pattern came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_source: Option<MatchSource>,
+
+    // Session/agent context — additive, no version bump.
+    // Helps disambiguate prompts when multiple Claude Code sessions run
+    // in parallel (agent teams, multiple terminal windows, etc.).
+
+    /// The full `session_id` UUID from the hook event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+
+    /// The working directory of the session that triggered this prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+
+    /// The `agent_type` field from the hook event when the prompt came from
+    /// a sub-agent (e.g. `"general-purpose"`, `"task-planner"`).
+    /// `None` when the prompt came from a top-level session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// Which side of the user's allowlist a pattern came from.
@@ -412,6 +430,9 @@ mod tests {
             hint: "git status".to_owned(),
             matched_pattern: Some("Bash(git status:*)".to_owned()),
             matched_source: Some(MatchSource::Allow),
+            session_id: None,
+            cwd: None,
+            agent_type: None,
         };
         let v = serde_json::to_value(&prompt).unwrap();
         assert_eq!(v["matched_pattern"], "Bash(git status:*)");
@@ -433,10 +454,54 @@ mod tests {
             hint: "echo hi".to_owned(),
             matched_pattern: None,
             matched_source: None,
+            session_id: None,
+            cwd: None,
+            agent_type: None,
         };
         let v = serde_json::to_value(&prompt).unwrap();
         assert!(v.get("matched_pattern").is_none(), "matched_pattern must be absent");
         assert!(v.get("matched_source").is_none(), "matched_source must be absent");
+    }
+
+    #[test]
+    fn prompt_info_session_context_round_trip() {
+        let prompt = PromptInfo {
+            id: "req_ctx".to_owned(),
+            tool: "Bash".to_owned(),
+            hint: "echo hi".to_owned(),
+            matched_pattern: None,
+            matched_source: None,
+            session_id: Some("3cb58992-935c-4fdd-9efd-1f160946e822".to_owned()),
+            cwd: Some("/home/user/dev/ccbridge".to_owned()),
+            agent_type: Some("general-purpose".to_owned()),
+        };
+        let v = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(v["session_id"], "3cb58992-935c-4fdd-9efd-1f160946e822");
+        assert_eq!(v["cwd"], "/home/user/dev/ccbridge");
+        assert_eq!(v["agent_type"], "general-purpose");
+
+        let p2: PromptInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(p2.session_id.as_deref(), Some("3cb58992-935c-4fdd-9efd-1f160946e822"));
+        assert_eq!(p2.cwd.as_deref(), Some("/home/user/dev/ccbridge"));
+        assert_eq!(p2.agent_type.as_deref(), Some("general-purpose"));
+    }
+
+    #[test]
+    fn prompt_info_session_context_optional_fields_omitted_when_none() {
+        let prompt = PromptInfo {
+            id: "req_no_ctx".to_owned(),
+            tool: "Bash".to_owned(),
+            hint: "echo hi".to_owned(),
+            matched_pattern: None,
+            matched_source: None,
+            session_id: None,
+            cwd: None,
+            agent_type: None,
+        };
+        let v = serde_json::to_value(&prompt).unwrap();
+        assert!(v.get("session_id").is_none(), "session_id must be absent when None");
+        assert!(v.get("cwd").is_none(), "cwd must be absent when None");
+        assert!(v.get("agent_type").is_none(), "agent_type must be absent when None");
     }
 
     #[test]

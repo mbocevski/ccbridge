@@ -290,12 +290,41 @@ async fn handle_heartbeat(
             }
 
             // A permission prompt is pending.  Post (or replace) the notification.
-            let summary = format!("Claude Code: approve {}?", prompt.tool);
 
-            // Include the matched allowlist pattern in the body when present, so
-            // the user understands why ccbridge is intercepting a call they may
-            // have intended to allow or deny via their settings.json patterns.
-            let body = if let (Some(pattern), Some(source)) = (
+            // Derive display helpers for session context.
+            let cwd_short = prompt
+                .cwd
+                .as_deref()
+                .map(shorten_cwd)
+                .filter(|s| !s.is_empty());
+            let agent_or_main = prompt.agent_type.as_deref().unwrap_or("main");
+            let session_short = prompt.session_id.as_deref().map(short_session_id);
+
+            // Summary: include cwd when available so parallel notifications
+            // are visually distinct in the swaync stack.
+            let summary = match cwd_short.as_deref() {
+                Some(c) => format!("Claude Code [{}]: approve {}?", c, prompt.tool),
+                None => format!("Claude Code: approve {}?", prompt.tool),
+            };
+
+            // Body: start with the hint, then add session/agent context line,
+            // then the allowlist-match annotation if present.
+            let mut body = prompt.hint.clone();
+
+            // Context line — omit when we have no useful identifiers.
+            if cwd_short.is_some() || session_short.is_some() {
+                let context = format!(
+                    "[{} · {} · {}]",
+                    cwd_short.as_deref().unwrap_or("?"),
+                    agent_or_main,
+                    session_short.as_deref().unwrap_or("?"),
+                );
+                body.push('\n');
+                body.push_str(&context);
+            }
+
+            // Allowlist annotation.
+            if let (Some(pattern), Some(source)) = (
                 prompt.matched_pattern.as_ref(),
                 prompt.matched_source.as_ref(),
             ) {
@@ -303,13 +332,13 @@ async fn handle_heartbeat(
                     MatchSource::Allow => "allowlists",
                     MatchSource::Deny => "denies",
                 };
-                format!(
-                    "{}\n[Claude {} this with pattern {:?} — confirm to override]",
-                    prompt.hint, source_label, pattern,
-                )
-            } else {
-                prompt.hint.clone()
-            };
+                body.push_str(&format!(
+                    "\n[Claude {} this with pattern {:?} — confirm to override]",
+                    source_label, pattern,
+                ));
+            }
+
+            // (body is now the composite of hint + context + optional annotation)
 
             // actions: flat list of (key, label) pairs.
             // "default" key = clicking the notification body.
@@ -474,5 +503,61 @@ async fn close_all(proxy: &NotificationsProxy<'_>, active: &mut HashMap<u32, Str
         if let Err(e) = proxy.close_notification(id).await {
             debug!(notif_id = id, "notify: CloseNotification error (stale id?): {e}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session context helpers
+// ---------------------------------------------------------------------------
+
+/// Shorten a cwd path to the last 2 components for compact display.
+///
+/// ```
+/// # use ccbridged::emit::notify::shorten_cwd;
+/// assert_eq!(shorten_cwd("/home/user/dev/ccbridge"), "dev/ccbridge");
+/// assert_eq!(shorten_cwd("/tmp"),                   "tmp");
+/// assert_eq!(shorten_cwd(""),                       "");
+/// assert_eq!(shorten_cwd("/"),                      "");
+/// ```
+pub fn shorten_cwd(cwd: &str) -> String {
+    let p = std::path::Path::new(cwd);
+    let comps: Vec<&str> = p
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .filter(|s| !s.is_empty() && *s != "/")
+        .collect();
+    let n = comps.len().min(2);
+    comps[comps.len() - n..].join("/")
+}
+
+/// Return the first 6 characters of a session UUID (git-SHA style).
+pub fn short_session_id(id: &str) -> String {
+    id.chars().take(6).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shorten_cwd_basics() {
+        assert_eq!(shorten_cwd("/home/user/dev/ccbridge"), "dev/ccbridge");
+        assert_eq!(shorten_cwd("/tmp"), "tmp");
+        assert_eq!(shorten_cwd(""), "");
+        assert_eq!(shorten_cwd("/"), "");
+        // Only one non-root component.
+        assert_eq!(shorten_cwd("/home"), "home");
+        // Three or more components: take last 2.
+        assert_eq!(shorten_cwd("/a/b/c/d"), "c/d");
+    }
+
+    #[test]
+    fn short_session_id_takes_six_chars() {
+        assert_eq!(
+            short_session_id("3cb58992-935c-4fdd-9efd-1f160946e822"),
+            "3cb589"
+        );
+        // Short id (unlikely in practice, but defensive).
+        assert_eq!(short_session_id("abc"), "abc");
     }
 }
