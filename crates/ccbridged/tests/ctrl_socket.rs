@@ -199,11 +199,11 @@ async fn permission_command_resolves_approval() {
         .await
         .expect("send HookEvent");
 
-    // Extract the decision receiver from the AwaitDecision response.
-    let response = respond_rx.await.expect("aggregator should respond");
-    let decision_rx = match response {
-        ccbridged::state::HookResponse::AwaitDecision { rx, .. } => rx,
-        _ => panic!("expected AwaitDecision"),
+    // Extract the decision receiver from the Await outcome.
+    let outcome = respond_rx.await.expect("aggregator should respond");
+    let decision_rx = match outcome {
+        ccbridged::state::HookOutcome::Await { rx, .. } => rx,
+        _ => panic!("expected HookOutcome::Await"),
     };
 
     // Now send the permission command over ctrl.

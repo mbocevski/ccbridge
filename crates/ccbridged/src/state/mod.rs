@@ -68,19 +68,19 @@ pub type AggregatorTx = mpsc::Sender<AggregatorMsg>;
 pub enum AggregatorMsg {
     /// A hook event has arrived from the ingest socket.
     ///
-    /// The responder must be fired exactly once:
-    /// - For most events: immediately, with [`HookResponse::Passthrough`].
-    /// - For `PreToolUse`: the aggregator stores the decision-tx side of a
-    ///   oneshot in `pending_approvals` and responds with
-    ///   [`HookResponse::AwaitDecision`], which carries the receive side.
+    /// The responder is fired exactly once with a [`HookOutcome`]:
+    /// - For most events: `HookOutcome::Immediate(HookResponse::Passthrough)`.
+    /// - For `PreToolUse`: either an immediate decision (allow/deny) or
+    ///   `HookOutcome::Await`, which carries the receive side of the approval
+    ///   oneshot for the ingest handler to await.
     HookEvent {
         event: Box<HookEvent>,
-        respond: oneshot::Sender<HookResponse>,
+        respond: oneshot::Sender<HookOutcome>,
     },
 
     /// An emit module (swaync, BLE, ctrl-socket) has resolved a pending
     /// permission prompt.  The aggregator pops the waiting oneshot from
-    /// `pending_approvals` and fires it.
+    /// `pending` and fires it.
     PermissionDecision {
         tool_use_id: ToolUseId,
         decision: WireDecision,
@@ -106,20 +106,19 @@ pub enum AggregatorMsg {
     /// summaries that should appear in `heartbeat.entries`.
     AddEntry { text: String },
 
-    /// The 30 s approval timeout in `ingest::hooks` fired before any emit
-    /// module (notify / BLE / ctrl) sent a decision.  The hook has already
-    /// written `Ask` to its stdout so Claude Code's own TUI will handle the
-    /// decision; the aggregator just needs to clear its pending state so the
-    /// next heartbeat shows `prompt: None` / `waiting: 0`.
+    /// The approval timeout in `ingest::hooks` fired before any emit module
+    /// sent a decision.  The hook has already written `Ask` to its stdout so
+    /// Claude Code's own TUI will handle the decision; the aggregator clears
+    /// its pending state so the next heartbeat shows `prompt: None` / `waiting: 0`.
     ///
-    /// Dropping the sender from `pending_approvals` is safe: if a late decision
-    /// somehow arrives (race between timeout + emit module), the existing
+    /// Dropping the sender from `pending` is safe: if a late decision somehow
+    /// arrives (race between timeout + emit module), the existing
     /// `handle_permission_decision` path logs a warn and discards it.
     ApprovalTimedOut { tool_use_id: ToolUseId },
 
     /// User clicked "Always" on a swaync notification.  The aggregator
     /// derives the most-conservative allowlist pattern for the pending event,
-    /// writes it to `settings.json`, and approves the current call.
+    /// writes it to `settings.local.json`, and approves the current call.
     ///
     /// For tools where a specific pattern cannot be auto-derived (bare-tool
     /// case), the call is denied with a helpful reason rather than risking
@@ -128,10 +127,13 @@ pub enum AggregatorMsg {
 }
 
 // ---------------------------------------------------------------------------
-// HookResponse
+// HookResponse / HookOutcome
 // ---------------------------------------------------------------------------
 
 /// What the hook ingest handler writes back to the hook binary's stdout.
+///
+/// This type represents the wire-serialisable response variants only.
+/// The await-and-wait control-flow case lives in [`HookOutcome::Await`].
 #[derive(Debug)]
 pub enum HookResponse {
     /// Exit 0 with no output — Claude Code's own TUI handles the decision.
@@ -144,18 +146,25 @@ pub enum HookResponse {
     /// Write `{"hookSpecificOutput":{"hookEventName":"PreToolUse",
     ///          "permissionDecision":"deny","permissionDecisionReason":"<reason>"}}`.
     ///
-    /// Used when a confident deny is reached — either by a deny-list rule
-    /// (Phase 2+) or when the user explicitly clicks Deny via an emit module.
-    /// The reason string tells Claude not to retry with alternative approaches.
+    /// Used when a confident deny is reached — either by a deny-list rule or
+    /// when the user explicitly clicks Deny via an emit module.
     HardDeny { reason: String },
+}
 
-    /// The aggregator stored the approval oneshot; the ingest handler should
-    /// await `rx` with `approval_timeout`, then write a `PermissionDecision`
-    /// or (on timeout) a response determined by `fallback`.
+/// What the aggregator returns to the hook ingest handler.
+///
+/// Either an immediate wire response, or a signal to run the await loop with
+/// the provided oneshot receiver.
+#[derive(Debug)]
+pub enum HookOutcome {
+    /// Write this response immediately and close the connection.
+    Immediate(HookResponse),
+
+    /// Stash the approval and await a decision from an emit module.
     ///
-    /// This variant is consumed entirely within `ingest::hooks` and is never
-    /// serialised to the wire.
-    AwaitDecision {
+    /// The ingest handler should await `rx` with `approval_timeout`, then write
+    /// a `PermissionDecision` or (on timeout) a response determined by `fallback`.
+    Await {
         /// Fires when a [`AggregatorMsg::PermissionDecision`] arrives for this id.
         rx: oneshot::Receiver<WireDecision>,
         tool_use_id: ToolUseId,
@@ -164,6 +173,25 @@ pub enum HookResponse {
         /// What to do when `approval_timeout` elapses with no decision.
         fallback: Fallback,
     },
+}
+
+// ---------------------------------------------------------------------------
+// PendingApproval
+// ---------------------------------------------------------------------------
+
+/// All per-approval context needed for heartbeat display, Always writes,
+/// and annotation rendering.  Keyed by `tool_use_id` in `Aggregator.pending`.
+struct PendingApproval {
+    /// Full event — needed by `handle_allowlist_always` to derive the pattern.
+    event: Box<ccbridge_proto::hook::PreToolUseEvent>,
+    /// Display name for `PromptInfo.tool`.
+    tool_name: String,
+    /// Short hint for `PromptInfo.hint`.
+    tool_hint: String,
+    /// Pattern that produced `AskAnnotated`; `None` for plain intercept.
+    matched_pattern: Option<String>,
+    /// Which side of the allowlist the matched pattern came from.
+    match_source: Option<AllowOrDeny>,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,25 +208,9 @@ pub struct Session {
     /// `true` while the session is blocked waiting for a permission decision.
     pub waiting: bool,
     /// The `tool_use_id` of the pending `PreToolUse`, if any.
+    ///
+    /// Used as the lookup key into `Aggregator.pending` for heartbeat display.
     pub pending_tool_use_id: Option<ToolUseId>,
-    /// Tool name for the pending approval — displayed on BLE device screen.
-    pub pending_tool_name: Option<String>,
-    /// Short hint for the pending approval — displayed on BLE device screen.
-    pub pending_tool_hint: Option<String>,
-    /// Phase 2+: the allowlist pattern that produced an `AskAnnotated` decision.
-    /// Stored for future use in annotation rendering (Phase 4).
-    pub pending_matched_pattern: Option<String>,
-    /// Phase 2+: which side of the allowlist the matched pattern came from.
-    pub pending_match_source: Option<AllowOrDeny>,
-    /// Agent type from the hook event (`agent_type` field); `None` for
-    /// top-level sessions.  Surfaced in the heartbeat `PromptInfo` to
-    /// disambiguate sub-agent prompts from main-session prompts.
-    pub pending_agent_type: Option<String>,
-
-    /// Full event stashed for the "Always" flow: if the user clicks Always,
-    /// the aggregator needs `tool_input` (and `agent_type`) to derive the
-    /// most-conservative allowlist pattern.  Boxed to keep variant sizes even.
-    pub pending_event: Option<Box<ccbridge_proto::hook::PreToolUseEvent>>,
 }
 
 impl Session {
@@ -209,25 +221,13 @@ impl Session {
             running: false,
             waiting: false,
             pending_tool_use_id: None,
-            pending_tool_name: None,
-            pending_tool_hint: None,
-            pending_matched_pattern: None,
-            pending_match_source: None,
-            pending_agent_type: None,
-            pending_event: None,
         }
     }
 
-    /// Clear all pending-approval state.
+    /// Clear pending-approval state on this session.
     fn clear_pending(&mut self) {
         self.waiting = false;
         self.pending_tool_use_id = None;
-        self.pending_tool_name = None;
-        self.pending_tool_hint = None;
-        self.pending_matched_pattern = None;
-        self.pending_match_source = None;
-        self.pending_agent_type = None;
-        self.pending_event = None;
     }
 }
 
@@ -258,10 +258,15 @@ pub struct Aggregator {
     /// Active Claude Code sessions, keyed by session ID.
     sessions: HashMap<SessionId, Session>,
 
-    /// Pending `PreToolUse` approvals.  The oneshot fires a [`WireDecision`]
-    /// back to the waiting ingest handler.  Keyed by `tool_use_id` alone —
-    /// Claude Code tool-use IDs are globally unique within a session.
-    pending_approvals: HashMap<ToolUseId, oneshot::Sender<WireDecision>>,
+    /// Pending `PreToolUse` approvals, keyed by `tool_use_id`.
+    ///
+    /// Each entry holds:
+    /// - The oneshot sender that fires a [`WireDecision`] back to the ingest handler.
+    /// - The [`PendingApproval`] payload (event, display fields, annotation).
+    ///
+    /// Single map avoids coordination between two separate maps and is the
+    /// authoritative source of truth for all per-approval context.
+    pending: HashMap<ToolUseId, (oneshot::Sender<WireDecision>, PendingApproval)>,
 
     /// Token counters.
     tokens: TokenState,
@@ -285,10 +290,6 @@ pub struct Aggregator {
     pub fallback: Fallback,
 
     /// Per-project allowlist cache, cascaded with the user-global allowlist.
-    ///
-    /// Replaces the previous single `Arc<ArcSwap<Allowlist>>`.  The cache
-    /// loads and watches project-local settings files lazily on first encounter
-    /// of each distinct project root (from `event.base.cwd`).
     allowlist_cache: Arc<ProjectAllowlistCache>,
 
     /// Path to the allowlist audit log.
@@ -321,7 +322,7 @@ impl Aggregator {
         let (hb_tx, hb_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let agg = Self {
             sessions: HashMap::new(),
-            pending_approvals: HashMap::new(),
+            pending: HashMap::new(),
             tokens: TokenState::default(),
             entries: VecDeque::with_capacity(ENTRIES_CAP),
             hb_tx,
@@ -346,29 +347,30 @@ impl Aggregator {
         let waiting = self.sessions.values().filter(|s| s.waiting).count() as u32;
 
         // Build `prompt` from the first waiting session (at most one in practice).
-        let prompt = self
-            .sessions
-            .values()
-            .find(|s| s.waiting)
-            .map(|s| PromptInfo {
-                id: s.pending_tool_use_id.clone().unwrap_or_default(),
-                tool: s.pending_tool_name.clone().unwrap_or_default(),
-                hint: s.pending_tool_hint.clone().unwrap_or_default(),
-                matched_pattern: s.pending_matched_pattern.clone(),
-                matched_source: s.pending_match_source.map(MatchSource::from),
-                // Session/agent context — always populated when a prompt is waiting.
+        // Look up the PendingApproval by `pending_tool_use_id` — single source of truth.
+        let prompt = self.sessions.values().find(|s| s.waiting).and_then(|s| {
+            let id = s.pending_tool_use_id.as_ref()?;
+            let (_, approval) = self.pending.get(id)?;
+            Some(PromptInfo {
+                id: id.clone(),
+                tool: approval.tool_name.clone(),
+                hint: approval.tool_hint.clone(),
+                matched_pattern: approval.matched_pattern.clone(),
+                matched_source: approval.match_source.map(MatchSource::from),
                 session_id: Some(s.id.clone()),
                 cwd: Some(s.cwd.clone()),
-                agent_type: s.pending_agent_type.clone(),
-            });
+                agent_type: approval.event.agent_type.clone(),
+            })
+        });
 
         let msg = if waiting > 0 {
-            // Include tool name if we have it.
             let tool = self
                 .sessions
                 .values()
                 .find(|s| s.waiting)
-                .and_then(|s| s.pending_tool_name.as_deref())
+                .and_then(|s| s.pending_tool_use_id.as_ref())
+                .and_then(|id| self.pending.get(id))
+                .map(|(_, pa)| pa.tool_name.as_str())
                 .unwrap_or("tool");
             format!("approve: {}", tool)
         } else if running > 0 {
@@ -410,7 +412,7 @@ impl Aggregator {
     // Event handlers (called from the run loop)
     // -----------------------------------------------------------------------
 
-    fn handle_hook_event(&mut self, event: HookEvent, respond: oneshot::Sender<HookResponse>) {
+    fn handle_hook_event(&mut self, event: HookEvent, respond: oneshot::Sender<HookOutcome>) {
         match event {
             HookEvent::SessionStart(e) => {
                 info!(session_id = %e.base.session_id, cwd = %e.base.cwd, "session started");
@@ -419,7 +421,7 @@ impl Aggregator {
                     .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd));
                 self.push_entry(format!("session: {}", e.base.cwd));
                 self.broadcast_heartbeat();
-                let _ = respond.send(HookResponse::Passthrough);
+                let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
 
             HookEvent::SessionEnd(e) => {
@@ -427,7 +429,7 @@ impl Aggregator {
                 self.sessions.remove(&e.base.session_id);
                 self.push_entry("session ended".to_owned());
                 self.broadcast_heartbeat();
-                let _ = respond.send(HookResponse::Passthrough);
+                let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
 
             HookEvent::PreToolUse(e) => {
@@ -445,7 +447,9 @@ impl Aggregator {
                             %reason,
                             "PreToolUse allowed without prompt",
                         );
-                        let _ = respond.send(HookResponse::PermissionDecision(WireDecision::Once));
+                        let _ = respond.send(HookOutcome::Immediate(
+                            HookResponse::PermissionDecision(WireDecision::Once),
+                        ));
                     }
                     Decision::Deny { reason } => {
                         debug!(
@@ -454,7 +458,8 @@ impl Aggregator {
                             %reason,
                             "PreToolUse denied without prompt",
                         );
-                        let _ = respond.send(HookResponse::HardDeny { reason });
+                        let _ =
+                            respond.send(HookOutcome::Immediate(HookResponse::HardDeny { reason }));
                     }
                     Decision::AskAnnotated {
                         matched_pattern,
@@ -487,7 +492,7 @@ impl Aggregator {
                     format_tool_hint(&e.tool_input),
                 ));
                 self.broadcast_heartbeat();
-                let _ = respond.send(HookResponse::Passthrough);
+                let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
 
             HookEvent::Stop(e) => {
@@ -501,7 +506,7 @@ impl Aggregator {
                     s.clear_pending();
                 }
                 self.broadcast_heartbeat();
-                let _ = respond.send(HookResponse::Passthrough);
+                let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
 
             HookEvent::Notification(e) => {
@@ -512,7 +517,7 @@ impl Aggregator {
                 );
                 self.push_entry(format!("notif: {}", e.message));
                 self.broadcast_heartbeat();
-                let _ = respond.send(HookResponse::Passthrough);
+                let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
 
             HookEvent::UserPromptSubmit(e) => {
@@ -523,31 +528,28 @@ impl Aggregator {
                     .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd));
                 session.running = true;
                 self.broadcast_heartbeat();
-                let _ = respond.send(HookResponse::Passthrough);
+                let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
 
             HookEvent::Unknown => {
-                // Forward-compat: log and skip, never crash.
                 debug!("Unknown hook event — ignoring");
-                let _ = respond.send(HookResponse::Passthrough);
+                let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
         }
     }
 
     /// Register a `PreToolUse` event into the hold-and-wait approval flow.
     ///
-    /// Creates a oneshot channel, stashes the sender in `pending_approvals`,
-    /// marks the session as `waiting`, and returns [`HookResponse::AwaitDecision`]
-    /// to the ingest handler, which drives the timeout loop.
+    /// Creates a oneshot channel, stashes the sender (plus all approval context)
+    /// in `pending`, marks the session as `waiting`, and returns
+    /// [`HookOutcome::Await`] to the ingest handler, which drives the timeout loop.
     ///
     /// `annotation` is `Some((pattern, source))` when the decision came from
-    /// [`crate::permission::Decision::AskAnnotated`] — i.e., the allowlist had
-    /// a pattern that matched ambiguously.  The fields are stored on the session
-    /// for future annotation rendering (Phase 4).  Pass `None` for plain intercept.
+    /// [`crate::permission::Decision::AskAnnotated`].  Pass `None` for plain intercept.
     fn start_intercept(
         &mut self,
         e: ccbridge_proto::hook::PreToolUseEvent,
-        respond: oneshot::Sender<HookResponse>,
+        respond: oneshot::Sender<HookOutcome>,
         annotation: Option<(String, AllowOrDeny)>,
     ) {
         let hint = format_tool_hint(&e.tool_input);
@@ -560,8 +562,21 @@ impl Aggregator {
         );
 
         let (decision_tx, decision_rx) = oneshot::channel::<WireDecision>();
-        self.pending_approvals
-            .insert(e.tool_use_id.clone(), decision_tx);
+
+        let (matched_pattern, match_source) = match annotation {
+            Some((p, s)) => (Some(p), Some(s)),
+            None => (None, None),
+        };
+
+        let approval = PendingApproval {
+            event: Box::new(e.clone()),
+            tool_name: e.tool_name.clone(),
+            tool_hint: hint,
+            matched_pattern,
+            match_source,
+        };
+        self.pending
+            .insert(e.tool_use_id.clone(), (decision_tx, approval));
 
         let session = self
             .sessions
@@ -569,18 +584,10 @@ impl Aggregator {
             .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd));
         session.waiting = true;
         session.pending_tool_use_id = Some(e.tool_use_id.clone());
-        session.pending_tool_name = Some(e.tool_name.clone());
-        session.pending_tool_hint = Some(hint);
-        session.pending_agent_type = e.agent_type.clone();
-        session.pending_event = Some(Box::new(e.clone()));
-        if let Some((pattern, source)) = annotation {
-            session.pending_matched_pattern = Some(pattern);
-            session.pending_match_source = Some(source);
-        }
 
         self.broadcast_heartbeat();
 
-        let _ = respond.send(HookResponse::AwaitDecision {
+        let _ = respond.send(HookOutcome::Await {
             rx: decision_rx,
             tool_use_id: e.tool_use_id,
             session_id: e.base.session_id,
@@ -590,8 +597,8 @@ impl Aggregator {
     }
 
     fn handle_permission_decision(&mut self, tool_use_id: ToolUseId, decision: WireDecision) {
-        match self.pending_approvals.remove(&tool_use_id) {
-            Some(tx) => {
+        match self.pending.remove(&tool_use_id) {
+            Some((tx, _approval)) => {
                 for session in self.sessions.values_mut() {
                     if session.pending_tool_use_id.as_deref() == Some(&tool_use_id) {
                         session.clear_pending();
@@ -617,19 +624,16 @@ impl Aggregator {
             DerivedPattern,
         };
 
-        // Look up the stashed PreToolUseEvent for this approval.
-        let event = self
-            .sessions
-            .values()
-            .find(|s| s.pending_tool_use_id.as_deref() == Some(&tool_use_id))
-            .and_then(|s| s.pending_event.as_deref().cloned());
-
-        let Some(event) = event else {
-            warn!(
-                tool_use_id = %tool_use_id,
-                "AllowlistAlways: no pending event found; ignoring",
-            );
-            return;
+        // O(1) lookup — no more session scan.
+        let event = match self.pending.get(&tool_use_id) {
+            Some((_, approval)) => (*approval.event).clone(),
+            None => {
+                warn!(
+                    tool_use_id = %tool_use_id,
+                    "AllowlistAlways: no pending approval found; ignoring",
+                );
+                return;
+            }
         };
 
         match derive_pattern(&event) {
@@ -641,7 +645,9 @@ impl Aggregator {
                     agent_type: event.agent_type.clone(),
                 };
                 match write_allow_pattern(&target, &pattern, &self.audit_log_path, metadata) {
-                    Ok(()) => info!(%pattern, ?target, "AllowlistAlways: wrote allow pattern"),
+                    Ok(()) => {
+                        info!(%pattern, root = %target.root.display(), "AllowlistAlways: wrote allow pattern")
+                    }
                     Err(e) => warn!("AllowlistAlways: failed to write pattern: {e:#}"),
                 }
                 // Approve this specific call regardless of write success.
@@ -709,10 +715,10 @@ impl Aggregator {
                             self.broadcast_heartbeat();
                         }
                         Some(AggregatorMsg::ApprovalTimedOut { tool_use_id }) => {
-                            // Drop the sender — any late decision arriving after
+                            // Drop the entry — any late decision arriving after
                             // this will hit the "no pending approval" warn in
                             // handle_permission_decision and be discarded.
-                            self.pending_approvals.remove(&tool_use_id);
+                            self.pending.remove(&tool_use_id);
                             // Clear session waiting flags so the next heartbeat
                             // has prompt: None / waiting: 0.
                             for session in self.sessions.values_mut() {
@@ -932,11 +938,11 @@ mod tests {
         agg.handle_hook_event(pre_tool_use_event("sess", "toolu_abc", "Bash"), respond_tx);
 
         // Aggregator should have stored the approval.
-        assert!(agg.pending_approvals.contains_key("toolu_abc"));
+        assert!(agg.pending.contains_key("toolu_abc"));
 
-        // The respond channel should have an AwaitDecision.
-        let response = respond_rx.try_recv().expect("respond should be fired");
-        assert!(matches!(response, HookResponse::AwaitDecision { .. }));
+        // The respond channel should have an Await outcome.
+        let outcome = respond_rx.try_recv().expect("respond should be fired");
+        assert!(matches!(outcome, HookOutcome::Await { .. }));
 
         // Heartbeat should reflect waiting=1 with populated prompt.
         let hb = agg.snapshot();
@@ -950,7 +956,6 @@ mod tests {
     #[test]
     fn ask_annotated_decision_surfaces_in_snapshot() {
         // Build an aggregator with an allowlist that produces AskAnnotated for Bash.
-        // A Bash call with no command field → Ambiguous allow → AskAnnotated.
         let al = crate::permission::Allowlist {
             allow: vec![crate::permission::Pattern::parse("Bash(git status:*)")],
             deny: vec![],
@@ -1005,8 +1010,6 @@ mod tests {
 
     #[test]
     fn snapshot_includes_session_id_and_cwd() {
-        // Bare PreToolUse (default permission mode): snapshot must carry
-        // session_id and cwd in PromptInfo.
         let mut agg = new_agg();
 
         let (tx0, _) = oneshot::channel();
@@ -1020,19 +1023,16 @@ mod tests {
 
         let hb = agg.snapshot();
         let prompt = hb.prompt.expect("prompt must be set");
-        // session_id is the UUID-like session identifier used internally.
         assert_eq!(
             prompt.session_id.as_deref(),
             Some("sess-cwd"),
             "session_id must be populated in PromptInfo"
         );
-        // cwd comes from HookBase; the test helper uses "/tmp".
         assert_eq!(
             prompt.cwd.as_deref(),
             Some("/tmp"),
             "cwd must be populated in PromptInfo"
         );
-        // No agent_type in the test helper.
         assert!(
             prompt.agent_type.is_none(),
             "agent_type must be None for a top-level session"
@@ -1041,13 +1041,11 @@ mod tests {
 
     #[test]
     fn start_intercept_captures_agent_type() {
-        // When a PreToolUse event carries agent_type, it must appear in snapshot.
         let mut agg = new_agg();
 
         let (tx0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess-agent"), tx0);
 
-        // Fire PreToolUse with agent_type set.
         let event = HookEvent::PreToolUse(PreToolUseEvent {
             base: HookBase {
                 session_id: "sess-agent".to_owned(),
@@ -1125,8 +1123,8 @@ mod tests {
         agg.handle_hook_event(event, respond_tx);
 
         let mut decision_rx = match respond_rx.try_recv().unwrap() {
-            HookResponse::AwaitDecision { rx, .. } => rx,
-            _ => panic!("expected AwaitDecision"),
+            HookOutcome::Await { rx, .. } => rx,
+            _ => panic!("expected Await"),
         };
 
         agg.handle_allowlist_always("toolu_always_01".to_owned());
@@ -1160,7 +1158,6 @@ mod tests {
         let (tx0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess_bare"), tx0);
 
-        // WebSearch has no derivable specific pattern → BareToolNeedsConfirmation.
         let event = HookEvent::PreToolUse(PreToolUseEvent {
             base: HookBase {
                 session_id: "sess_bare".to_owned(),
@@ -1179,14 +1176,12 @@ mod tests {
         agg.handle_hook_event(event, respond_tx);
 
         let mut decision_rx = match respond_rx.try_recv().unwrap() {
-            HookResponse::AwaitDecision { rx, .. } => rx,
-            _ => panic!("expected AwaitDecision"),
+            HookOutcome::Await { rx, .. } => rx,
+            _ => panic!("expected Await"),
         };
 
-        // Trigger AllowlistAlways for a bare tool.
         agg.handle_allowlist_always("toolu_bare_01".to_owned());
 
-        // Should be denied (bare-tool guardrail).
         let decision = decision_rx.try_recv().expect("AllowlistAlways must fire");
         assert_eq!(
             decision,
@@ -1198,7 +1193,6 @@ mod tests {
     #[test]
     fn allowlist_always_unknown_tool_use_id_no_panic() {
         let mut agg = new_agg();
-        // Should log a warning and return without panic.
         agg.handle_allowlist_always("toolu_nonexistent".to_owned());
     }
 
@@ -1209,7 +1203,6 @@ mod tests {
         let (tx0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess_bypass"), tx0);
 
-        // Fire PreToolUse with bypassPermissions mode.
         let event = HookEvent::PreToolUse(PreToolUseEvent {
             base: HookBase {
                 session_id: "sess_bypass".to_owned(),
@@ -1228,21 +1221,19 @@ mod tests {
         let (respond_tx, mut respond_rx) = oneshot::channel();
         agg.handle_hook_event(event, respond_tx);
 
-        // Must respond immediately with PermissionDecision::Once — no oneshot wait.
-        let response = respond_rx
+        let outcome = respond_rx
             .try_recv()
             .expect("short-circuit must fire immediately");
         assert!(
             matches!(
-                response,
-                HookResponse::PermissionDecision(WireDecision::Once)
+                outcome,
+                HookOutcome::Immediate(HookResponse::PermissionDecision(WireDecision::Once))
             ),
-            "permissive mode must auto-allow: got {response:?}",
+            "permissive mode must auto-allow: got {outcome:?}",
         );
 
-        // Must NOT enter pending_approvals or set waiting=1.
         assert!(
-            !agg.pending_approvals.contains_key("toolu_bypass_01"),
+            !agg.pending.contains_key("toolu_bypass_01"),
             "permissive mode must not register an approval",
         );
         let hb = agg.snapshot();
@@ -1259,29 +1250,24 @@ mod tests {
         let (respond_tx, mut respond_rx) = oneshot::channel();
         agg.handle_hook_event(pre_tool_use_event("sess", "toolu_xyz", "Bash"), respond_tx);
 
-        // Extract the decision rx from the AwaitDecision response.
-        let response = respond_rx.try_recv().unwrap();
-        let mut decision_rx = match response {
-            HookResponse::AwaitDecision { rx, .. } => rx,
-            _ => panic!("expected AwaitDecision"),
+        let outcome = respond_rx.try_recv().unwrap();
+        let mut decision_rx = match outcome {
+            HookOutcome::Await { rx, .. } => rx,
+            _ => panic!("expected Await"),
         };
 
-        // Send the decision.
         agg.handle_permission_decision("toolu_xyz".to_owned(), WireDecision::Once);
 
-        // The oneshot should have fired.
         let decision = decision_rx
             .try_recv()
             .expect("decision should have been fired");
         assert_eq!(decision, WireDecision::Once);
 
-        // Session should no longer be waiting.
         let hb = agg.snapshot();
         assert_eq!(hb.waiting, 0);
         assert!(hb.prompt.is_none());
 
-        // Pending approvals map should be empty.
-        assert!(agg.pending_approvals.is_empty());
+        assert!(agg.pending.is_empty());
     }
 
     #[test]
@@ -1291,20 +1277,18 @@ mod tests {
         let (tx0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess"), tx0);
 
-        // Register a pending approval.
         let (respond_tx, mut respond_rx) = oneshot::channel();
         agg.handle_hook_event(
             pre_tool_use_event("sess", "toolu_timeout", "Bash"),
             respond_tx,
         );
 
-        // Consume the AwaitDecision response (we won't use it — simulating timeout).
         let _ = respond_rx.try_recv().unwrap();
         assert_eq!(agg.snapshot().waiting, 1);
-        assert!(!agg.pending_approvals.is_empty());
+        assert!(!agg.pending.is_empty());
 
         // Simulate what the ingest handler does when the timeout fires.
-        agg.pending_approvals.remove("toolu_timeout");
+        agg.pending.remove("toolu_timeout");
         for session in agg.sessions.values_mut() {
             if session.pending_tool_use_id.as_deref() == Some("toolu_timeout") {
                 session.clear_pending();
@@ -1312,11 +1296,7 @@ mod tests {
         }
         agg.broadcast_heartbeat();
 
-        // State must be clean — no waiting, no prompt.
-        assert!(
-            agg.pending_approvals.is_empty(),
-            "pending approvals must be cleared"
-        );
+        assert!(agg.pending.is_empty(), "pending must be cleared");
         assert_eq!(agg.snapshot().waiting, 0, "waiting must be 0 after timeout");
         assert!(
             agg.snapshot().prompt.is_none(),
@@ -1327,9 +1307,7 @@ mod tests {
     #[test]
     fn permission_decision_unknown_id_does_not_panic() {
         let mut agg = new_agg();
-        // No prior PreToolUse — should just log a warning.
         agg.handle_permission_decision("toolu_nonexistent".to_owned(), WireDecision::Deny);
-        // If we get here without panic, the test passes.
     }
 
     #[test]
@@ -1339,22 +1317,41 @@ mod tests {
         let (tx0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess"), tx0);
 
-        // Simulate running.
         let (tx1, _) = oneshot::channel();
         agg.handle_hook_event(user_prompt_event("sess"), tx1);
         assert_eq!(agg.snapshot().running, 1);
 
-        // Simulate a stale waiting state (shouldn't happen in production, but
-        // we must handle it defensively).
+        // Simulate a stale waiting state by inserting directly.
         if let Some(s) = agg.sessions.get_mut("sess") {
             s.waiting = true;
             s.pending_tool_use_id = Some("toolu_stale".to_owned());
-            s.pending_tool_name = Some("Bash".to_owned());
-            s.pending_tool_hint = Some("rm -rf".to_owned());
         }
+        let (dummy_tx, _) = oneshot::channel::<WireDecision>();
+        agg.pending.insert(
+            "toolu_stale".to_owned(),
+            (
+                dummy_tx,
+                PendingApproval {
+                    event: Box::new(PreToolUseEvent {
+                        base: base("sess"),
+                        permission_mode: PermissionMode::Default,
+                        effort: None,
+                        tool_name: "Bash".to_owned(),
+                        tool_input: json!({}),
+                        tool_use_id: "toolu_stale".to_owned(),
+                        agent_id: None,
+                        agent_type: None,
+                    }),
+                    tool_name: "Bash".to_owned(),
+                    tool_hint: "rm -rf".to_owned(),
+                    matched_pattern: None,
+                    match_source: None,
+                },
+            ),
+        );
         assert_eq!(agg.snapshot().waiting, 1);
 
-        // Fire Stop — should clear both.
+        // Fire Stop — should clear session waiting state.
         let (tx2, _) = oneshot::channel();
         agg.handle_hook_event(stop_event("sess"), tx2);
 
@@ -1366,14 +1363,11 @@ mod tests {
 
     #[test]
     fn daily_reset_zeroes_today_keeps_cumulative_updates_date() {
-        // Test DailyReset handling directly on the Aggregator struct
-        // (no run loop needed — verifies the state mutation in isolation).
         let mut agg = new_agg();
         agg.tokens.cumulative = 50_000;
         agg.tokens.today = 12_000;
         agg.tokens.date = "2026-05-19".to_owned();
 
-        // Simulate the DailyReset arm of the run loop.
         agg.tokens.today = 0;
         agg.tokens.date = "2026-05-20".to_owned();
 
@@ -1392,9 +1386,7 @@ mod tests {
             agg.push_entry(format!("entry-{}", i));
         }
         assert_eq!(agg.entries.len(), ENTRIES_CAP);
-        // Newest entry (entry-11) should be at the front.
         assert_eq!(agg.entries[0], "entry-11");
-        // Oldest surviving entry should be entry-4 (entries 0-3 were evicted).
         assert_eq!(agg.entries[ENTRIES_CAP - 1], "entry-4");
     }
 
@@ -1423,7 +1415,7 @@ mod tests {
                 Arc::new(crate::permission::Allowlist::empty()),
             )),
         );
-        drop(hb_rx); // not needed here
+        drop(hb_rx);
 
         let (respond_tx, respond_rx) = oneshot::channel();
         tx.send(AggregatorMsg::GetHeartbeat {
@@ -1456,7 +1448,10 @@ mod tests {
         .unwrap();
 
         let resp = respond_rx.await.unwrap();
-        assert!(matches!(resp, HookResponse::Passthrough));
+        assert!(matches!(
+            resp,
+            HookOutcome::Immediate(HookResponse::Passthrough)
+        ));
 
         let (hb_tx, hb_rx2) = oneshot::channel();
         tx.send(AggregatorMsg::GetHeartbeat { respond: hb_tx })
@@ -1476,7 +1471,6 @@ mod tests {
             )),
         );
 
-        // Start a session.
         let (r1_tx, r1_rx) = oneshot::channel();
         tx.send(AggregatorMsg::HookEvent {
             event: Box::new(session_start_event("psess")),
@@ -1486,10 +1480,8 @@ mod tests {
         .unwrap();
         r1_rx.await.unwrap();
 
-        // Drain keepalive heartbeats.
         while hb_rx.try_recv().is_ok() {}
 
-        // Fire PreToolUse.
         let (r2_tx, r2_rx) = oneshot::channel();
         tx.send(AggregatorMsg::HookEvent {
             event: Box::new(pre_tool_use_event("psess", "toolu_run1", "Bash")),
@@ -1498,19 +1490,16 @@ mod tests {
         .await
         .unwrap();
 
-        // The aggregator should have sent AwaitDecision with the approval rx.
         let resp = r2_rx.await.unwrap();
         let decision_rx = match resp {
-            HookResponse::AwaitDecision { rx, .. } => rx,
-            _ => panic!("expected AwaitDecision"),
+            HookOutcome::Await { rx, .. } => rx,
+            _ => panic!("expected Await"),
         };
 
-        // Heartbeat should now show waiting=1.
         let hb = hb_rx.recv().await.unwrap();
         assert_eq!(hb.waiting, 1);
         assert!(hb.prompt.is_some());
 
-        // Resolve the approval.
         tx.send(AggregatorMsg::PermissionDecision {
             tool_use_id: "toolu_run1".to_owned(),
             decision: WireDecision::Once,
@@ -1518,11 +1507,9 @@ mod tests {
         .await
         .unwrap();
 
-        // The decision_rx should fire.
         let decision = decision_rx.await.unwrap();
         assert_eq!(decision, WireDecision::Once);
 
-        // Next heartbeat should show waiting=0.
         let hb2 = hb_rx.recv().await.unwrap();
         assert_eq!(hb2.waiting, 0);
         assert!(hb2.prompt.is_none());
@@ -1549,7 +1536,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Drain until we see cumulative=8000.
         loop {
             let hb = hb_rx.recv().await.unwrap();
             if hb.tokens == 8_000 {
@@ -1557,7 +1543,6 @@ mod tests {
             }
         }
 
-        // Reset.
         tx.send(AggregatorMsg::DailyReset {
             date: "2026-05-20".to_owned(),
         })
@@ -1582,11 +1567,9 @@ mod tests {
                 Arc::new(crate::permission::Allowlist::empty()),
             )),
         );
-        // Subscribe a second receiver before sending any messages.
         let mut hb_rx2 = hb_rx1.resubscribe();
         let mut hb_rx1 = hb_rx1;
 
-        // Trigger a state change.
         let (r_tx, r_rx) = oneshot::channel();
         tx.send(AggregatorMsg::HookEvent {
             event: Box::new(session_start_event("multi-sess")),
@@ -1596,7 +1579,6 @@ mod tests {
         .unwrap();
         r_rx.await.unwrap();
 
-        // Both subscribers should see a heartbeat with total=1.
         let hb1 = loop {
             let h = hb_rx1.recv().await.unwrap();
             if h.total == 1 {

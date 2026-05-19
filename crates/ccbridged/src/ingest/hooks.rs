@@ -37,7 +37,7 @@ use tokio::time::timeout;
 use tracing::{debug, error, warn};
 
 use crate::config::Fallback;
-use crate::state::{AggregatorMsg, AggregatorTx, HookResponse};
+use crate::state::{AggregatorMsg, AggregatorTx, HookOutcome, HookResponse};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -138,7 +138,7 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
     debug!("hook: received event {}", event_name_str(&event));
 
     // --- 2. Send to aggregator ---
-    let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+    let (respond_tx, respond_rx) = tokio::sync::oneshot::channel::<HookOutcome>();
     if agg_tx
         .send(AggregatorMsg::HookEvent {
             event: Box::new(event),
@@ -152,8 +152,8 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
         return Ok(());
     }
 
-    // --- 3. Await response ---
-    let response = match respond_rx.await {
+    // --- 3. Await outcome ---
+    let outcome = match respond_rx.await {
         Ok(r) => r,
         Err(_) => {
             // Aggregator dropped the sender — shouldn't happen in normal operation.
@@ -163,12 +163,12 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
     };
 
     // --- 4. Write response ---
-    match response {
-        HookResponse::Passthrough => {
+    match outcome {
+        HookOutcome::Immediate(HookResponse::Passthrough) => {
             // Write nothing. Hook exits 0 with no stdout → Claude Code takes over.
         }
 
-        HookResponse::PermissionDecision(decision) => {
+        HookOutcome::Immediate(HookResponse::PermissionDecision(decision)) => {
             let resp = pre_tool_use_response(
                 wire_to_hook_decision(decision),
                 reason_for_user_decision(decision),
@@ -176,14 +176,13 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
             write_json_line(&mut writer, &resp).await?;
         }
 
-        HookResponse::HardDeny { reason } => {
-            // Confident deny from permission::evaluate (deny-list match, Phase 2+).
-            // Carries the pattern-match reason so Claude understands the denial.
+        HookOutcome::Immediate(HookResponse::HardDeny { reason }) => {
+            // Confident deny from permission::evaluate (deny-list match).
             let resp = pre_tool_use_response(PermissionDecision::Deny, Some(reason));
             write_json_line(&mut writer, &resp).await?;
         }
 
-        HookResponse::AwaitDecision {
+        HookOutcome::Await {
             rx,
             approval_timeout,
             tool_use_id,
