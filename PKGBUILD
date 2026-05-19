@@ -16,9 +16,13 @@ sha256sums=('SKIP')
 
 pkgver() {
     cd "$srcdir/ccbridge"
-    git describe --long --tags 2>/dev/null \
-        | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
-        || printf "r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    local desc
+    desc=$(git describe --long --tags 2>/dev/null)
+    if [[ -n "$desc" ]]; then
+        echo "$desc" | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+    else
+        printf "r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    fi
 }
 
 build() {
