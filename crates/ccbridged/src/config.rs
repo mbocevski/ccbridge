@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ccbridge daemon configuration loader.
 //!
 //! Config is loaded from `$XDG_CONFIG_HOME/ccbridge/config.toml` (or

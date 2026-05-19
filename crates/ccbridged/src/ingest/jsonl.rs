@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! JSONL tail — inotify-driven token tracker and entry extractor.
 //!
 //! # What this module does

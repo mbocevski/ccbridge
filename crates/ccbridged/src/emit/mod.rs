@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Emitter modules.
 //! notify: freedesktop notification daemon (swaync/mako/dunst/GNOME/KDE) — always-on
 //! ble:    BlueZ NUS peripheral — feature = "ble", disabled on Pixelbook

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `ccbridged setup` — one-shot, idempotent first-run configuration.
 //!
 //! # What it does

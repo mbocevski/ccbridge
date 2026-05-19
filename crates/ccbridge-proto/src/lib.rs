@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ccbridge-proto — shared wire-protocol types for the ccbridge ecosystem.
 //!
 //! Three modules, each independently re-exportable:

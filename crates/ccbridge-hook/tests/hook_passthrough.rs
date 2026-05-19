@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Integration tests for the ccbridge-hook binary.
 //!
 //! Tests run the real `ccbridge-hook` binary as a subprocess via

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Integration tests for the hook ingest socket.
 //!
 //! Each test:

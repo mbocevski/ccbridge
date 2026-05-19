@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Permission evaluator — decides what to do with a `PreToolUse` event
 //! before the aggregator registers an approval.
 //!

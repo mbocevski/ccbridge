@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ccbridged library — exposes internal modules for integration tests.
 //!
 //! This lib target exists solely so `tests/` can reference `ccbridged::state`

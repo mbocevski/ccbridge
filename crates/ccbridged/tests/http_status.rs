@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Integration tests for the HTTP /status endpoint.
 
 use std::net::SocketAddr;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Freedesktop notification daemon emitter (works with swaync, mako, dunst,
 //! GNOME, KDE, …) — speaks `org.freedesktop.Notifications` via zbus.
 //!

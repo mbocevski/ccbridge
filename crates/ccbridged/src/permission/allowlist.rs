@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `Allowlist` — the parsed `permissions.allow` / `.deny` arrays from
 //! `~/.claude/settings.json`.
 

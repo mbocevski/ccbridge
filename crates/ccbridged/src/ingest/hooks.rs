@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Hook ingest socket — Unix stream listener for `ccbridge-hook` events.
 //!
 //! # Protocol

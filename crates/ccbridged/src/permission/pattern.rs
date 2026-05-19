@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Pattern type + matcher for individual `permissions.allow` / `.deny` entries.
 //!
 //! # Design invariant

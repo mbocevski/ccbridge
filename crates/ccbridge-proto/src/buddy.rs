@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! BLE Hardware Buddy wire-protocol types.
 //!
 //! Exact JSON shapes from `~/dev/claude-desktop-buddy/REFERENCE.md`.

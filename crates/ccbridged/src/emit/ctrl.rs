@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Control socket emitter — bidirectional NDJSON over a Unix domain socket.
 //!
 //! Binds `$XDG_RUNTIME_DIR/ccbridge/ctrl.sock` (mode 0600) and speaks the

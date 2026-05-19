@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ccbridge-hook — Claude Code hook shim.
 //!
 //! Reads a JSON event from stdin, forwards it to the daemon over

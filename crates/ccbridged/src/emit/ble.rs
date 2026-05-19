@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! BlueZ NUS peripheral emitter stub.
 //!
 //! Gated behind `feature = "ble"`.  Pixelbook builds use `--no-default-features`

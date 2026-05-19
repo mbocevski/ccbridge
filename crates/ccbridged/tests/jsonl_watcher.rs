@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Integration tests for the JSONL watcher.
 //!
 //! Uses a tempdir as a fake `~/.claude/projects/` directory.

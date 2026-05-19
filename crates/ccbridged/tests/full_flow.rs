@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Full-flow integration tests.
 //!
 //! Exercises all four moving parts together:

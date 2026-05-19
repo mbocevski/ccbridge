@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Aggregator — single-writer task owning all daemon state.
 //!
 //! # Architecture

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Claude Code hook event shapes.
 //!
 //! Claude Code writes one JSON object to stdin for each hook invocation.

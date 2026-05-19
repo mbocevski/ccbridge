@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ccbridged — Claude Code aggregator bridge daemon.
 //!
 //! Aggregates state across all running Claude Code sessions on this machine

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Integration tests for the ctrl socket emitter.
 //!
 //! Each test:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Optional HTTP `/status` endpoint for waybar custom modules.
 //!
 //! Disabled by default (`emit.http.enabled = false` in config).  When enabled,

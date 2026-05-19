@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Control-socket protocol types.
 //!
 //! `$XDG_RUNTIME_DIR/ccbridge/ctrl.sock` is the stable, bidirectional
