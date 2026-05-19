@@ -1,8 +1,9 @@
 //! ccbridged — Claude Code aggregator bridge daemon.
 //!
 //! Aggregates state across all running Claude Code sessions on this machine
-//! and re-emits the claude-desktop-buddy BLE wire protocol, swaync
-//! notifications, and a bidirectional control socket.
+//! and surfaces them through freedesktop notifications (swaync, mako, dunst,
+//! GNOME, KDE) and a bidirectional control socket. The control socket also
+//! exposes the claude-desktop-buddy wire protocol for future BLE bridges.
 //!
 //! # Socket directory
 //!
@@ -48,7 +49,7 @@ fn main() {
 }
 
 async fn daemon_main(tz_offset: i32) -> Result<()> {
-    use ccbridged::emit::{ctrl as ctrl_emit, swaync as swaync_emit};
+    use ccbridged::emit::{ctrl as ctrl_emit, notify as notify_emit};
     use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
     use ccbridged::state::{spawn as spawn_aggregator, DEFAULT_APPROVAL_TIMEOUT};
 
@@ -119,7 +120,7 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
 
     // Spawn emit tasks.
     // swaync subscribes via resubscribe() so ctrl can consume hb_rx directly.
-    swaync_emit::spawn(agg_tx.clone(), hb_rx.resubscribe());
+    notify_emit::spawn(agg_tx.clone(), hb_rx.resubscribe());
     ctrl_emit::spawn(runtime_dir, agg_tx, hb_rx, owner, tz_offset);
 
     info!("ccbridged ready");

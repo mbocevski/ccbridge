@@ -1,4 +1,5 @@
-//! swaync DBus emitter — `org.freedesktop.Notifications` via zbus.
+//! Freedesktop notification daemon emitter (works with swaync, mako, dunst,
+//! GNOME, KDE, …) — speaks `org.freedesktop.Notifications` via zbus.
 //!
 //! # What this module does
 //!
@@ -71,6 +72,9 @@ trait Notifications {
     /// Close a notification by ID.  No-op if the ID is stale.
     fn close_notification(&self, id: u32) -> zbus::Result<()>;
 
+    /// Returns the server capabilities (e.g. `["actions", "body", "body-markup"]`).
+    fn get_capabilities(&self) -> zbus::Result<Vec<String>>;
+
     /// Fired when the user clicks a notification action.
     #[zbus(signal)]
     fn action_invoked(&self, id: u32, action_key: String) -> zbus::Result<()>;
@@ -86,7 +90,7 @@ trait Notifications {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Spawn the swaync emitter as a tokio task.
+/// Spawn the notify emitter as a tokio task.
 ///
 /// If the session bus is unreachable, the task exits immediately after logging
 /// a warning.  The spawned [`tokio::task::JoinHandle`] is always returned so
@@ -98,7 +102,7 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(e) = run(agg_tx, hb_rx).await {
-            warn!("swaync: emitter exited with error: {e:#}");
+            warn!("notify: emitter exited with error: {e:#}");
         }
     })
 }
@@ -114,7 +118,7 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
     let conn = match Connection::session().await {
         Ok(c) => c,
         Err(e) => {
-            warn!("swaync: cannot connect to session bus: {e} — disabling swaync emitter");
+            warn!("notify: cannot connect to session bus: {e} — disabling notify emitter");
             return Ok(());
         }
     };
@@ -122,7 +126,7 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
     let proxy = match NotificationsProxy::new(&conn).await {
         Ok(p) => p,
         Err(e) => {
-            warn!("swaync: cannot create Notifications proxy: {e} — disabling swaync emitter");
+            warn!("notify: cannot create Notifications proxy: {e} — disabling notify emitter");
             return Ok(());
         }
     };
@@ -131,7 +135,7 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
     let mut action_stream = match proxy.receive_action_invoked().await {
         Ok(s) => s,
         Err(e) => {
-            warn!("swaync: cannot subscribe to ActionInvoked: {e} — disabling swaync emitter");
+            warn!("notify: cannot subscribe to ActionInvoked: {e} — disabling notify emitter");
             return Ok(());
         }
     };
@@ -140,13 +144,31 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
         Ok(s) => s,
         Err(e) => {
             warn!(
-                "swaync: cannot subscribe to NotificationClosed: {e} — disabling swaync emitter"
+                "notify: cannot subscribe to NotificationClosed: {e} — disabling notify emitter"
             );
             return Ok(());
         }
     };
 
-    info!("swaync: emitter connected to session bus");
+    info!("notify: emitter connected to session bus");
+
+    // Probe server capabilities once — diagnostic only, no behavior branches.
+    match proxy.get_capabilities().await {
+        Ok(caps) => {
+            info!(capabilities = ?caps, "notify: server capabilities");
+            if !caps.iter().any(|c| c == "actions") {
+                warn!(
+                    "notify: server does not advertise the 'actions' capability — \
+                     Approve/Deny buttons may not be visible. Configure your daemon \
+                     to render notification actions, or use the ctrl socket / Claude \
+                     TUI fallback to decide."
+                );
+            }
+        }
+        Err(e) => {
+            debug!("notify: GetCapabilities failed (non-fatal): {e}");
+        }
+    }
 
     // notif_id → tool_use_id for every currently-visible approval notification.
     // In normal operation at most one entry lives here (one pending prompt),
@@ -180,10 +202,10 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
                     ).await,
 
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        debug!("swaync: broadcast lagged by {n} — skipping ahead");
+                        debug!("notify: broadcast lagged by {n} — skipping ahead");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        debug!("swaync: broadcast channel closed — exiting");
+                        debug!("notify: broadcast channel closed — exiting");
                         break;
                     }
                 }
@@ -204,7 +226,7 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
                         }
                     }
                     None => {
-                        warn!("swaync: ActionInvoked signal stream ended — exiting");
+                        warn!("notify: ActionInvoked signal stream ended — exiting");
                         break;
                     }
                 }
@@ -219,7 +241,7 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
                         }
                     }
                     None => {
-                        warn!("swaync: NotificationClosed signal stream ended — exiting");
+                        warn!("notify: NotificationClosed signal stream ended — exiting");
                         break;
                     }
                 }
@@ -299,7 +321,7 @@ async fn handle_heartbeat(
                         notif_id = id,
                         tool_use_id = %prompt.id,
                         tool = %prompt.tool,
-                        "swaync: notification posted",
+                        "notify: notification posted",
                     );
                     // If this replaced a previous notification it already closed
                     // the old one server-side; we just update our map.
@@ -310,7 +332,7 @@ async fn handle_heartbeat(
                     *last_notif_id = id;
                 }
                 Err(e) => {
-                    warn!("swaync: Notify call failed: {e}");
+                    warn!("notify: Notify call failed: {e}");
                 }
             }
         }
@@ -319,7 +341,7 @@ async fn handle_heartbeat(
             // No pending prompt — a decision arrived from another emitter (BLE,
             // ctrl socket) or the session resolved naturally.  Close everything.
             if !active.is_empty() {
-                debug!("swaync: prompt cleared externally — closing {} notification(s)", active.len());
+                debug!("notify: prompt cleared externally — closing {} notification(s)", active.len());
                 close_all(proxy, active).await;
                 *last_notif_id = 0;
             }
@@ -351,7 +373,7 @@ async fn handle_action(
             debug!(
                 notif_id,
                 action_key,
-                "swaync: ActionInvoked for unknown/stale notification — ignoring",
+                "notify: ActionInvoked for unknown/stale notification — ignoring",
             );
             return;
         }
@@ -361,7 +383,7 @@ async fn handle_action(
         "default" | "once" => WireDecision::Once,
         "deny" => WireDecision::Deny,
         other => {
-            debug!(notif_id, action_key = other, "swaync: unknown action key — ignoring");
+            debug!(notif_id, action_key = other, "notify: unknown action key — ignoring");
             // Put it back: we consumed it from the map but didn't act.
             active.insert(notif_id, tool_use_id);
             return;
@@ -372,7 +394,7 @@ async fn handle_action(
         notif_id,
         tool_use_id = %tool_use_id,
         action = action_key,
-        "swaync: user actioned notification",
+        "notify: user actioned notification",
     );
 
     // Send the decision to the aggregator.
@@ -405,7 +427,7 @@ fn handle_closed(
         debug!(
             notif_id,
             tool_use_id = %tool_use_id,
-            "swaync: notification dismissed — suppressing re-post until prompt clears",
+            "notify: notification dismissed — suppressing re-post until prompt clears",
         );
         dismissed.insert(tool_use_id);
     }
@@ -421,9 +443,9 @@ fn handle_closed(
 /// it is always safe to call this unconditionally.
 async fn close_all(proxy: &NotificationsProxy<'_>, active: &mut HashMap<u32, String>) {
     for (id, tool_use_id) in active.drain() {
-        debug!(notif_id = id, tool_use_id = %tool_use_id, "swaync: closing notification");
+        debug!(notif_id = id, tool_use_id = %tool_use_id, "notify: closing notification");
         if let Err(e) = proxy.close_notification(id).await {
-            debug!(notif_id = id, "swaync: CloseNotification error (stale id?): {e}");
+            debug!(notif_id = id, "notify: CloseNotification error (stale id?): {e}");
         }
     }
 }
