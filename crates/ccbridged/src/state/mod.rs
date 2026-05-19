@@ -35,7 +35,7 @@ use tracing::{debug, info, warn};
 use arc_swap::ArcSwap;
 
 use crate::config::Fallback;
-use crate::permission::{AllowOrDeny, Allowlist};
+use crate::permission::{AllowOrDeny, Allowlist, ProjectAllowlistCache};
 
 // ---------------------------------------------------------------------------
 // AllowOrDeny → MatchSource conversion (wire boundary)
@@ -284,13 +284,12 @@ pub struct Aggregator {
     /// decision from any emit module.
     pub fallback: Fallback,
 
-    /// Parsed `permissions.allow` / `.deny` from `~/.claude/settings.json`.
+    /// Per-project allowlist cache, cascaded with the user-global allowlist.
     ///
-    /// Wrapped in `ArcSwap` so the settings watcher can atomically swap in a
-    /// freshly-parsed allowlist without holding any lock on the hot path.
-    /// The outer `Arc` lets both the aggregator and the watcher task hold a
-    /// handle to the same `ArcSwap` without lifetime complications.
-    allowlist: Arc<ArcSwap<Allowlist>>,
+    /// Replaces the previous single `Arc<ArcSwap<Allowlist>>`.  The cache
+    /// loads and watches project-local settings files lazily on first encounter
+    /// of each distinct project root (from `event.base.cwd`).
+    allowlist_cache: Arc<ProjectAllowlistCache>,
 
     /// Path to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`).
     /// Used by `AllowlistAlways` to atomically write a new allow pattern.
@@ -320,7 +319,7 @@ impl Aggregator {
     pub fn new(
         approval_timeout: Duration,
         fallback: Fallback,
-        allowlist: Arc<ArcSwap<Allowlist>>,
+        allowlist_cache: Arc<ProjectAllowlistCache>,
         settings_path: std::path::PathBuf,
         audit_log_path: std::path::PathBuf,
     ) -> (Self, broadcast::Receiver<Heartbeat>) {
@@ -333,7 +332,7 @@ impl Aggregator {
             hb_tx,
             approval_timeout,
             fallback,
-            allowlist,
+            allowlist_cache,
             settings_path,
             audit_log_path,
         };
@@ -440,9 +439,11 @@ impl Aggregator {
             HookEvent::PreToolUse(e) => {
                 use crate::permission::{self, Decision};
 
-                // Load the current allowlist snapshot (lock-free).
-                let al = self.allowlist.load();
-                match permission::evaluate(&e, &al) {
+                // Cascade project-local + project + user allowlists for this cwd.
+                let cascade = self.allowlist_cache.cascade_for(
+                    std::path::Path::new(&e.base.cwd),
+                );
+                match permission::evaluate(&e, &cascade) {
                     Decision::Allow { reason } => {
                         debug!(
                             session_id = %e.base.session_id,
@@ -750,36 +751,41 @@ impl Aggregator {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Spawn the Aggregator with explicit settings and audit-log paths.
-///
-/// Used by the real daemon so `AllowlistAlways` writes to the right places.
+/// Spawn the Aggregator with explicit paths (production).
 pub fn spawn_with_paths(
     approval_timeout: Duration,
     fallback: Fallback,
-    allowlist: Arc<ArcSwap<Allowlist>>,
+    allowlist_cache: Arc<ProjectAllowlistCache>,
     settings_path: std::path::PathBuf,
     audit_log_path: std::path::PathBuf,
 ) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
-    let (agg, hb_rx) =
-        Aggregator::new(approval_timeout, fallback, allowlist, settings_path, audit_log_path);
+    let (agg, hb_rx) = Aggregator::new(
+        approval_timeout,
+        fallback,
+        allowlist_cache,
+        settings_path,
+        audit_log_path,
+    );
     let (tx, rx) = mpsc::channel(256);
     tokio::spawn(agg.run(rx));
     (tx, hb_rx)
 }
 
-/// Spawn the Aggregator with no-op paths for settings/audit.
+/// Spawn the Aggregator with a bare user allowlist (test shim).
 ///
-/// Used by unit and integration tests where `AllowlistAlways` is either not
-/// exercised or given explicit temp-dir paths in the test body.
+/// Wraps the user allowlist in a `ProjectAllowlistCache` with no-op
+/// settings/audit paths.  Integration tests that don't exercise `AllowlistAlways`
+/// or project-local evaluation can pass a plain `Arc<ArcSwap<Allowlist>>` here.
 pub fn spawn(
     approval_timeout: Duration,
     fallback: Fallback,
-    allowlist: Arc<ArcSwap<Allowlist>>,
+    user_allowlist: Arc<ArcSwap<Allowlist>>,
 ) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
+    let cache = Arc::new(ProjectAllowlistCache::new(user_allowlist));
     spawn_with_paths(
         approval_timeout,
         fallback,
-        allowlist,
+        cache,
         std::path::PathBuf::from("/dev/null"),
         std::path::PathBuf::from("/dev/null"),
     )
@@ -885,10 +891,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn new_agg() -> Aggregator {
+        let user = Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty())));
+        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user));
         let (agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
-            Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))),
+            cache,
             std::path::PathBuf::from("/dev/null"),
             std::path::PathBuf::from("/dev/null"),
         );
@@ -969,10 +977,13 @@ mod tests {
             allow: vec![crate::permission::Pattern::parse("Bash(git status:*)")],
             deny: vec![],
         };
+        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(
+            Arc::new(ArcSwap::new(Arc::new(al))),
+        ));
         let (mut agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
-            Arc::new(ArcSwap::new(Arc::new(al))),
+            cache,
             std::path::PathBuf::from("/dev/null"),
             std::path::PathBuf::from("/dev/null"),
         );
@@ -1096,10 +1107,12 @@ mod tests {
         settings: &std::path::Path,
         audit: &std::path::Path,
     ) -> Aggregator {
+        let user = Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty())));
+        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user));
         let (agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
-            Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))),
+            cache,
             settings.to_path_buf(),
             audit.to_path_buf(),
         );

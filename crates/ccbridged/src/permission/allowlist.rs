@@ -55,15 +55,21 @@ impl Allowlist {
     ///
     /// No dedup is performed.  Redundant patterns are harmless (short-circuit
     /// on the first match) and dedup adds complexity with no practical benefit.
-    pub fn cascade(local: Self, project: Self, user: Self) -> Self {
+    /// Re-parses each pattern from its raw string to avoid the Clone constraint
+    /// on `globset::Glob` inside `ArgMatcher::PathGlob`.  Cold path; parsing is
+    /// cheap (no I/O).
+    pub fn cascade(local: &Self, project: &Self, user: &Self) -> Self {
+        fn reparse(patterns: &[Pattern]) -> impl Iterator<Item = Pattern> + '_ {
+            patterns.iter().map(|p| Pattern::parse(p.raw()))
+        }
         Self {
-            allow: local.allow.into_iter()
-                .chain(project.allow)
-                .chain(user.allow)
+            allow: reparse(&local.allow)
+                .chain(reparse(&project.allow))
+                .chain(reparse(&user.allow))
                 .collect(),
-            deny: local.deny.into_iter()
-                .chain(project.deny)
-                .chain(user.deny)
+            deny: reparse(&local.deny)
+                .chain(reparse(&project.deny))
+                .chain(reparse(&user.deny))
                 .collect(),
         }
     }
@@ -248,7 +254,7 @@ mod tests {
         let project = allowlist_with_patterns(&[], &["Bash(npm test)"]);
         let user = allowlist_with_patterns(&[], &["Read(**/.env*)"]);
 
-        let merged = Allowlist::cascade(local, project, user);
+        let merged = Allowlist::cascade(&local, &project, &user);
 
         let deny_raws = raw_strs(&merged.deny);
         assert!(deny_raws.contains(&"Skill"),            "local deny must be present");
@@ -263,7 +269,7 @@ mod tests {
         let project = allowlist_with_patterns(&["Bash(npm test)"],    &[]);
         let user = allowlist_with_patterns(&["Skill"],                &[]);
 
-        let merged = Allowlist::cascade(local, project, user);
+        let merged = Allowlist::cascade(&local, &project, &user);
 
         let allow_raws = raw_strs(&merged.allow);
         assert!(allow_raws.contains(&"Agent(task-planner)"), "local allow must be present");
@@ -279,7 +285,7 @@ mod tests {
         let project = allowlist_with_patterns(&["B"], &["Y"]);
         let user = allowlist_with_patterns(&["C"], &["Z"]);
 
-        let merged = Allowlist::cascade(local, project, user);
+        let merged = Allowlist::cascade(&local, &project, &user);
 
         let allow_raws = raw_strs(&merged.allow);
         assert_eq!(allow_raws, vec!["A", "B", "C"], "allow order must be local→project→user");

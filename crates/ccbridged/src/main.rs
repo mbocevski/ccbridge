@@ -68,7 +68,7 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     use ccbridged::emit::{ctrl as ctrl_emit, http as http_emit, notify as notify_emit};
     use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
     use arc_swap::ArcSwap;
-    use ccbridged::permission::{settings_path, spawn_settings_watcher, Allowlist};
+    use ccbridged::permission::{settings_path, spawn_settings_watcher, Allowlist, ProjectAllowlistCache};
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -145,11 +145,12 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
             std::path::PathBuf::from("/dev/null")
         });
 
-    // Spawn the aggregator (single-writer state task + broadcast channel).
+    // Build the per-project allowlist cache and spawn the aggregator.
+    let allowlist_cache = Arc::new(ProjectAllowlistCache::new(Arc::clone(&allowlist)));
     let (agg_tx, hb_rx) = ccbridged::state::spawn_with_paths(
         config.approvals.timeout(),
         config.approvals.fallback,
-        allowlist,
+        allowlist_cache,
         sp,
         audit_log,
     );
