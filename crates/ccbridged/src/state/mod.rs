@@ -98,12 +98,20 @@ pub enum HookResponse {
     Passthrough,
 
     /// Write `{"hookSpecificOutput":{"hookEventName":"PreToolUse",
-    ///          "permissionDecision":"allow"|"deny"}}` to stdout.
+    ///          "permissionDecision":"allow"}}` to stdout.
     PermissionDecision(WireDecision),
+
+    /// Write `{"hookSpecificOutput":{"hookEventName":"PreToolUse",
+    ///          "permissionDecision":"deny","permissionDecisionReason":"<reason>"}}`.
+    ///
+    /// Used when a confident deny is reached — either by a deny-list rule
+    /// (Phase 2+) or when the user explicitly clicks Deny via an emit module.
+    /// The reason string tells Claude not to retry with alternative approaches.
+    HardDeny { reason: String },
 
     /// The aggregator stored the approval oneshot; the ingest handler should
     /// await `rx` with `approval_timeout`, then write a `PermissionDecision`
-    /// or `Passthrough` depending on the outcome.
+    /// or (on timeout) an `Ask` response carrying a reason.
     ///
     /// This variant is consumed entirely within `ingest::hooks` and is never
     /// serialised to the wire.
@@ -330,59 +338,36 @@ impl Aggregator {
             }
 
             HookEvent::PreToolUse(e) => {
-                // Short-circuit: if Claude Code is already in a permissive mode,
-                // the user has opted into auto-allow.  Intercepting would just
-                // spam swaync with notifications they never intended to approve
-                // manually.  Respond immediately with Once and return.
-                //
-                // `Plan` is intentionally NOT in this list — plan mode is more
-                // restrictive (read-only), not permissive.
-                if matches!(
-                    e.permission_mode,
-                    PermissionMode::AcceptEdits
-                        | PermissionMode::Auto
-                        | PermissionMode::DontAsk
-                        | PermissionMode::BypassPermissions,
-                ) {
-                    debug!(
-                        session_id = %e.base.session_id,
-                        tool = %e.tool_name,
-                        mode = ?e.permission_mode,
-                        "PreToolUse — permissive mode, auto-allowing without prompt",
-                    );
-                    let _ = respond.send(HookResponse::PermissionDecision(WireDecision::Once));
-                    return;
+                use crate::permission::{self, Decision};
+
+                match permission::evaluate(&e) {
+                    Decision::Allow { reason } => {
+                        debug!(
+                            session_id = %e.base.session_id,
+                            tool = %e.tool_name,
+                            %reason,
+                            "PreToolUse allowed without prompt",
+                        );
+                        let _ = respond.send(HookResponse::PermissionDecision(WireDecision::Once));
+                    }
+                    Decision::Deny { reason } => {
+                        debug!(
+                            session_id = %e.base.session_id,
+                            tool = %e.tool_name,
+                            %reason,
+                            "PreToolUse denied without prompt",
+                        );
+                        let _ = respond.send(HookResponse::HardDeny { reason });
+                    }
+                    Decision::AskAnnotated { .. } => {
+                        // Phase 2+: evaluate() never returns AskAnnotated yet.
+                        // Treat as Intercept for forward-compat.
+                        self.start_intercept(e, respond);
+                    }
+                    Decision::Intercept => {
+                        self.start_intercept(e, respond);
+                    }
                 }
-
-                let hint = format_tool_hint(&e.tool_input);
-                debug!(
-                    session_id = %e.base.session_id,
-                    tool = %e.tool_name,
-                    tool_use_id = %e.tool_use_id,
-                    hint = %hint,
-                    "PreToolUse — holding for approval",
-                );
-
-                let (decision_tx, decision_rx) = oneshot::channel::<WireDecision>();
-                self.pending_approvals.insert(e.tool_use_id.clone(), decision_tx);
-
-                let session = self
-                    .sessions
-                    .entry(e.base.session_id.clone())
-                    .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd));
-                session.waiting = true;
-                session.pending_tool_use_id = Some(e.tool_use_id.clone());
-                session.pending_tool_name = Some(e.tool_name.clone());
-                session.pending_tool_hint = Some(hint);
-
-                self.broadcast_heartbeat();
-
-                let _ = respond.send(HookResponse::AwaitDecision {
-                    rx: decision_rx,
-                    tool_use_id: e.tool_use_id,
-                    session_id: e.base.session_id,
-                    approval_timeout: self.approval_timeout,
-                });
             }
 
             HookEvent::PostToolUse(e) => {
@@ -442,6 +427,51 @@ impl Aggregator {
                 let _ = respond.send(HookResponse::Passthrough);
             }
         }
+    }
+
+    /// Register a `PreToolUse` event into the hold-and-wait approval flow.
+    ///
+    /// Creates a oneshot channel, stashes the sender in `pending_approvals`,
+    /// marks the session as `waiting`, and returns [`HookResponse::AwaitDecision`]
+    /// to the ingest handler, which drives the timeout loop.
+    ///
+    /// This is extracted from `handle_hook_event` so that both
+    /// [`permission::Decision::Intercept`] and [`permission::Decision::AskAnnotated`]
+    /// (Phase 2+) can share the same implementation.
+    fn start_intercept(
+        &mut self,
+        e: ccbridge_proto::hook::PreToolUseEvent,
+        respond: oneshot::Sender<HookResponse>,
+    ) {
+        let hint = format_tool_hint(&e.tool_input);
+        debug!(
+            session_id = %e.base.session_id,
+            tool = %e.tool_name,
+            tool_use_id = %e.tool_use_id,
+            hint = %hint,
+            "PreToolUse — holding for approval",
+        );
+
+        let (decision_tx, decision_rx) = oneshot::channel::<WireDecision>();
+        self.pending_approvals.insert(e.tool_use_id.clone(), decision_tx);
+
+        let session = self
+            .sessions
+            .entry(e.base.session_id.clone())
+            .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd));
+        session.waiting = true;
+        session.pending_tool_use_id = Some(e.tool_use_id.clone());
+        session.pending_tool_name = Some(e.tool_name.clone());
+        session.pending_tool_hint = Some(hint);
+
+        self.broadcast_heartbeat();
+
+        let _ = respond.send(HookResponse::AwaitDecision {
+            rx: decision_rx,
+            tool_use_id: e.tool_use_id,
+            session_id: e.base.session_id,
+            approval_timeout: self.approval_timeout,
+        });
     }
 
     fn handle_permission_decision(&mut self, tool_use_id: ToolUseId, decision: WireDecision) {

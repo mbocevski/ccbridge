@@ -311,10 +311,25 @@ async fn timeout_passthrough() {
         "hook must exit 0 on timeout: {:?}",
         output.status,
     );
+    // Timeout must produce an "ask" response — not empty stdout.
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.stdout.is_empty(),
-        "hook must produce no stdout on timeout, got: {:?}",
-        String::from_utf8_lossy(&output.stdout),
+        !stdout.is_empty(),
+        "hook must produce an 'ask' response on timeout, not empty stdout"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("timeout stdout must be valid JSON");
+    assert_eq!(
+        v["hookSpecificOutput"]["permissionDecision"],
+        "ask",
+        "timeout fallback must be 'ask', got: {stdout:?}",
+    );
+    assert!(
+        v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false),
+        "timeout ask must carry a reason"
     );
 }
 

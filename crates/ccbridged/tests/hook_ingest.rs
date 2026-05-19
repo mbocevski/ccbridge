@@ -144,6 +144,11 @@ async fn pre_tool_use_allow_decision() {
         resp.hook_specific_output.permission_decision,
         PermissionDecision::Allow,
     );
+    // Allow carries no reason.
+    assert!(
+        resp.hook_specific_output.permission_decision_reason.is_none(),
+        "Allow should carry no permissionDecisionReason"
+    );
 }
 
 /// PreToolUse with a Deny decision.
@@ -179,11 +184,18 @@ async fn pre_tool_use_deny_decision() {
         resp.hook_specific_output.permission_decision,
         PermissionDecision::Deny,
     );
+    // Deny must carry a reason so Claude doesn't silently retry.
+    let reason = resp
+        .hook_specific_output
+        .permission_decision_reason
+        .expect("Deny must include permissionDecisionReason");
+    assert!(!reason.is_empty(), "reason must be non-empty");
 }
 
-/// PreToolUse with no decision within the timeout → passthrough (no output).
+/// PreToolUse with no decision within the timeout → sends Ask with reason
+/// so Claude Code surfaces its own TUI prompt regardless of permission mode.
 #[tokio::test]
-async fn pre_tool_use_timeout_passthrough() {
+async fn pre_tool_use_timeout_sends_ask() {
     // Use a very short timeout so the test doesn't take 30 s.
     let (_dir, _agg_tx, runtime_dir) = setup(Duration::from_millis(50)).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
@@ -203,13 +215,16 @@ async fn pre_tool_use_timeout_passthrough() {
     // Wait longer than the timeout.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Connection should have closed with no output.
-    let line = recv_line(&mut reader).await;
-    assert!(
-        line.is_none(),
-        "timeout should produce no output (passthrough), got: {:?}",
-        line
+    // Must receive an "ask" decision — not EOF.
+    let line = recv_line(&mut reader).await.expect(
+        "timeout must produce an 'ask' response, not EOF",
     );
+    let v: serde_json::Value = serde_json::from_str(&line).expect("must be valid JSON");
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "ask");
+    let reason = v["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("ask must include permissionDecisionReason");
+    assert!(!reason.is_empty(), "timeout ask reason must be non-empty");
 }
 
 /// Malformed JSON input → connection closes cleanly, no panic.

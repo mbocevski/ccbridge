@@ -167,7 +167,7 @@ pub struct PermissionCmd {
 /// Named `WireDecision` (not `PermissionDecision`) to avoid confusion with
 /// [`hook::PermissionDecision`], which carries the hook-stdout values
 /// `allow|deny|ask` — a different semantic domain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WireDecision {
     /// Approve this tool call once.

@@ -167,7 +167,17 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
         }
 
         HookResponse::PermissionDecision(decision) => {
-            let resp = pre_tool_use_response(decision);
+            let resp = pre_tool_use_response(
+                wire_to_hook_decision(decision),
+                reason_for_user_decision(decision),
+            );
+            write_json_line(&mut writer, &resp).await?;
+        }
+
+        HookResponse::HardDeny { reason } => {
+            // Confident deny from permission::evaluate (deny-list match, Phase 2+).
+            // Carries the pattern-match reason so Claude understands the denial.
+            let resp = pre_tool_use_response(PermissionDecision::Deny, Some(reason));
             write_json_line(&mut writer, &resp).await?;
         }
 
@@ -176,19 +186,35 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
             approval_timeout,
             ..
         } => {
-            // Wait for an emit module (swaync / BLE / ctrl-socket) to resolve.
-            // On timeout: passthrough (Claude Code's own TUI handles it).
+            // Wait for an emit module (notify / BLE / ctrl-socket) to resolve.
             match timeout(approval_timeout, rx).await {
                 Ok(Ok(decision)) => {
-                    let resp = pre_tool_use_response(decision);
+                    let resp = pre_tool_use_response(
+                        wire_to_hook_decision(decision),
+                        reason_for_user_decision(decision),
+                    );
                     write_json_line(&mut writer, &resp).await?;
                 }
                 Ok(Err(_)) => {
                     // oneshot sender dropped (aggregator shutting down mid-wait).
+                    // True passthrough: write nothing, let Claude Code decide.
                     debug!("hook: approval sender dropped — passthrough");
                 }
                 Err(_elapsed) => {
-                    debug!("hook: approval timeout elapsed — passthrough");
+                    // Timeout elapsed with no decision from any emit module.
+                    // Send `ask` so Claude Code surfaces its own interactive TUI
+                    // prompt regardless of the user's permission mode.
+                    // Without this, bypassPermissions/skipDangerous setups
+                    // would silently auto-approve — surprising and unsafe.
+                    debug!("hook: approval timeout — falling back to Ask");
+                    let resp = pre_tool_use_response(
+                        PermissionDecision::Ask,
+                        Some(
+                            "ccbridge: approval timeout — falling back to interactive prompt"
+                                .to_owned(),
+                        ),
+                    );
+                    write_json_line(&mut writer, &resp).await?;
                 }
             }
         }
@@ -200,6 +226,23 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The reason string sent back to Claude Code when a user explicitly denies a
+/// tool call.  Centralised here so it has one place to edit.
+const USER_DENY_REASON: &str = "User explicitly denied this tool call via ccbridge. \
+                                 Do not retry with alternative approaches; ask the user \
+                                 what to do instead.";
+
+/// Map a `WireDecision` to the `Option<String>` reason Claude Code sees on the wire.
+///
+/// Allow → no reason (Claude needs no explanation for a granted call).
+/// Deny  → `USER_DENY_REASON` so Claude doesn't silently retry alternatives.
+fn reason_for_user_decision(d: WireDecision) -> Option<String> {
+    match d {
+        WireDecision::Deny => Some(USER_DENY_REASON.to_owned()),
+        WireDecision::Once => None,
+    }
+}
 
 /// Serialise `WireDecision` (BLE/ctrl protocol) to `hook::PermissionDecision`
 /// (Claude Code hook stdout protocol).
@@ -216,12 +259,15 @@ fn wire_to_hook_decision(d: WireDecision) -> PermissionDecision {
 }
 
 /// Build the `PreToolUseResponse` that Claude Code expects on hook stdout.
-fn pre_tool_use_response(decision: WireDecision) -> PreToolUseResponse {
+fn pre_tool_use_response(
+    permission_decision: PermissionDecision,
+    permission_decision_reason: Option<String>,
+) -> PreToolUseResponse {
     PreToolUseResponse {
         hook_specific_output: PreToolUseOutput {
             hook_event_name: "PreToolUse".to_owned(),
-            permission_decision: wire_to_hook_decision(decision),
-            permission_decision_reason: None,
+            permission_decision,
+            permission_decision_reason,
             updated_input: None,
             additional_context: None,
         },

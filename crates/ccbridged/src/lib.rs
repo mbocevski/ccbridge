@@ -6,6 +6,7 @@
 
 pub mod emit;
 pub mod ingest;
+pub mod permission;
 pub mod state;
 #[doc(hidden)]
 pub mod setup;
