@@ -51,9 +51,9 @@ ccbridge respects `permissions.allow` and `permissions.deny` entries in
 `~/.claude/settings.json`. Tool calls that confidently match an allow-list
 pattern are auto-approved without a notification; those matching a deny-list
 pattern are hard-denied. Ambiguous or unrecognised patterns are surfaced with
-an annotation explaining which pattern triggered the intercept. See
-[docs/permission-handling.md](docs/permission-handling.md) for the full
-decision logic.
+an annotation in the notification body explaining which pattern triggered the
+intercept. Run `journalctl --user -u ccbridge | grep allowlist` to see which
+decisions the daemon is making in real time.
 
 If the daemon is not running or crashes, Claude Code behaves exactly as if
 ccbridge were not installed. The hook binary exits 0 with no output on any
