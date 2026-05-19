@@ -528,7 +528,7 @@ pub(crate) fn secs_until_next_local_midnight() -> std::time::Duration {
 ///
 /// Standalone implementation so we don't need a calendar crate just for
 /// formatting a date string.
-fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
+pub(crate) fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
     // Shift epoch to 1 March 0 (makes leap-year logic simpler).
     days += 719468;
     let era = days / 146097;

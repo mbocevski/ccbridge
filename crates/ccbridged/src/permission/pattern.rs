@@ -67,6 +67,13 @@ pub enum ArgMatcher {
     /// Only confident for `Bash`.
     BashPrefix(String),
 
+    /// Exact Bash command match against `tool_input["command"]`.
+    ///
+    /// Parsed from `"Bash(exact_command)"` (no `:*` suffix).
+    /// Produced by `permission::additions::derive_pattern` — matches only
+    /// when the command is exactly this string.
+    BashExact(String),
+
     /// We recognised the wrapper syntax but cannot confidently evaluate the
     /// argument semantics.  Always returns [`MatchResult::Ambiguous`] when the
     /// tool name matches.
@@ -214,9 +221,12 @@ impl Pattern {
 
             "Bash" => {
                 if let Some(prefix) = args.strip_suffix(":*") {
+                    // "Bash(git status:*)" → prefix match
                     ArgMatcher::BashPrefix(prefix.trim_end().to_owned())
                 } else {
-                    ArgMatcher::Ambiguous
+                    // "Bash(git status)" → exact command match (produced by
+                    // derive_pattern; also accepted from user-written patterns)
+                    ArgMatcher::BashExact(args.to_owned())
                 }
             }
 
@@ -310,6 +320,24 @@ fn match_tool_args(
                 None => MatchResult::Ambiguous,
                 Some(cmd) => {
                     if cmd.starts_with(prefix.as_str()) {
+                        MatchResult::Confident
+                    } else {
+                        MatchResult::NoMatch
+                    }
+                }
+            }
+        }
+
+        ArgMatcher::BashExact(expected) => {
+            // Exact Bash command match — produced by derive_pattern; also
+            // accepted when the user writes "Bash(some command)" by hand.
+            if tool != "Bash" {
+                return MatchResult::Ambiguous;
+            }
+            match tool_input.get("command").and_then(|v| v.as_str()) {
+                None => MatchResult::Ambiguous,
+                Some(cmd) => {
+                    if cmd == expected.as_str() {
                         MatchResult::Confident
                     } else {
                         MatchResult::NoMatch
@@ -428,11 +456,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_bash_no_colon_star_uses_ambiguous_matcher() {
+    fn parse_bash_no_colon_star_uses_exact_matcher() {
+        // Without ":*" suffix, "Bash(cmd)" produces an exact-command matcher
+        // (introduced so derive_pattern can produce round-trippable patterns).
         let p = Pattern::parse("Bash(rm -rf)");
         assert!(
-            matches!(p, Pattern::ToolWithArgs { ref tool, arg_matcher: ArgMatcher::Ambiguous, .. } if tool == "Bash"),
-            "expected ToolWithArgs with Ambiguous matcher, got {p:?}"
+            matches!(p, Pattern::ToolWithArgs { ref tool, arg_matcher: ArgMatcher::BashExact(_), .. } if tool == "Bash"),
+            "expected ToolWithArgs with BashExact matcher, got {p:?}"
         );
     }
 

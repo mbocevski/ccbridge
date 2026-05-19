@@ -24,6 +24,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use ccbridge_proto::hook::{PermissionMode, PreToolUseEvent};
 
+pub mod additions;
 pub mod allowlist;
 pub mod pattern;
 
