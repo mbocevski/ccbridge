@@ -25,7 +25,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use ccbridge_proto::buddy::{Heartbeat, PromptInfo, WireDecision};
-use ccbridge_proto::hook::HookEvent;
+use ccbridge_proto::hook::{HookEvent, PermissionMode};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
@@ -92,6 +92,7 @@ pub enum AggregatorMsg {
 // ---------------------------------------------------------------------------
 
 /// What the hook ingest handler writes back to the hook binary's stdout.
+#[derive(Debug)]
 pub enum HookResponse {
     /// Exit 0 with no output — Claude Code's own TUI handles the decision.
     Passthrough,
@@ -329,6 +330,30 @@ impl Aggregator {
             }
 
             HookEvent::PreToolUse(e) => {
+                // Short-circuit: if Claude Code is already in a permissive mode,
+                // the user has opted into auto-allow.  Intercepting would just
+                // spam swaync with notifications they never intended to approve
+                // manually.  Respond immediately with Once and return.
+                //
+                // `Plan` is intentionally NOT in this list — plan mode is more
+                // restrictive (read-only), not permissive.
+                if matches!(
+                    e.permission_mode,
+                    PermissionMode::AcceptEdits
+                        | PermissionMode::Auto
+                        | PermissionMode::DontAsk
+                        | PermissionMode::BypassPermissions,
+                ) {
+                    debug!(
+                        session_id = %e.base.session_id,
+                        tool = %e.tool_name,
+                        mode = ?e.permission_mode,
+                        "PreToolUse — permissive mode, auto-allowing without prompt",
+                    );
+                    let _ = respond.send(HookResponse::PermissionDecision(WireDecision::Once));
+                    return;
+                }
+
                 let hint = format_tool_hint(&e.tool_input);
                 debug!(
                     session_id = %e.base.session_id,
@@ -605,7 +630,7 @@ mod tests {
             tool_name: tool.to_owned(),
             tool_input: json!({"command": "echo hello"}),
             tool_use_id: tool_use_id.to_owned(),
-            tool_result: json!("output"),
+            tool_result: Some(json!("output")),
             agent_id: None,
             agent_type: None,
         })
@@ -684,6 +709,48 @@ mod tests {
         assert_eq!(prompt.id, "toolu_abc");
         assert_eq!(prompt.tool, "Bash");
         assert_eq!(prompt.hint, "echo hello");
+    }
+
+    #[test]
+    fn permissive_mode_pre_tool_use_auto_allows_without_prompt() {
+        let mut agg = new_agg();
+
+        let (tx0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess_bypass"), tx0);
+
+        // Fire PreToolUse with bypassPermissions mode.
+        let event = HookEvent::PreToolUse(PreToolUseEvent {
+            base: HookBase {
+                session_id: "sess_bypass".to_owned(),
+                transcript_path: "/tmp/bypass.jsonl".to_owned(),
+                cwd: "/tmp".to_owned(),
+            },
+            permission_mode: PermissionMode::BypassPermissions,
+            effort: None,
+            tool_name: "Bash".to_owned(),
+            tool_input: serde_json::json!({"command": "echo hi"}),
+            tool_use_id: "toolu_bypass_01".to_owned(),
+            agent_id: None,
+            agent_type: None,
+        });
+
+        let (respond_tx, mut respond_rx) = oneshot::channel();
+        agg.handle_hook_event(event, respond_tx);
+
+        // Must respond immediately with PermissionDecision::Once — no oneshot wait.
+        let response = respond_rx.try_recv().expect("short-circuit must fire immediately");
+        assert!(
+            matches!(response, HookResponse::PermissionDecision(WireDecision::Once)),
+            "permissive mode must auto-allow: got {response:?}",
+        );
+
+        // Must NOT enter pending_approvals or set waiting=1.
+        assert!(
+            !agg.pending_approvals.contains_key("toolu_bypass_01"),
+            "permissive mode must not register an approval",
+        );
+        let hb = agg.snapshot();
+        assert_eq!(hb.waiting, 0, "permissive mode must not set waiting");
     }
 
     #[test]

@@ -210,7 +210,13 @@ pub struct PostToolUseEvent {
     pub tool_use_id: String,
 
     /// The output produced by the tool (string or structured object).
-    pub tool_result: Value,
+    ///
+    /// Per Claude Code docs, `tool_result` is **optional**: it is absent when
+    /// the tool call errored out before producing output, or for tools that
+    /// have no output.  Using `Option<Value>` with `#[serde(default)]` ensures
+    /// these events are parsed correctly instead of silently dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
@@ -515,6 +521,50 @@ mod tests {
             HookEvent::SessionEnd(e) => {
                 assert_eq!(e.reason.as_deref(), Some("logout"));
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn post_tool_use_without_tool_result_parses_ok() {
+        // tool_result is optional: absent when the tool errored before producing
+        // output or for tools with no output.  This must NOT return a parse error.
+        let raw = json!({
+            "session_id": "sess_pt",
+            "transcript_path": "/tmp/sess_pt.jsonl",
+            "cwd": "/tmp",
+            "permission_mode": "default",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "exit 1"},
+            "tool_use_id": "toolu_err_01"
+            // tool_result intentionally absent
+        });
+        let evt: HookEvent = serde_json::from_value(raw).expect(
+            "PostToolUse without tool_result must parse successfully",
+        );
+        match &evt {
+            HookEvent::PostToolUse(e) => {
+                assert!(e.tool_result.is_none(), "tool_result should be None when absent");
+                assert_eq!(e.tool_name, "Bash");
+            }
+            _ => panic!("wrong variant"),
+        }
+        // With tool_result present it should still parse as Some.
+        let with_result = json!({
+            "session_id": "sess_pt2",
+            "transcript_path": "/tmp/sess_pt2.jsonl",
+            "cwd": "/tmp",
+            "permission_mode": "default",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/foo.txt"},
+            "tool_use_id": "toolu_ok_01",
+            "tool_result": "contents"
+        });
+        let evt2: HookEvent = serde_json::from_value(with_result).unwrap();
+        match evt2 {
+            HookEvent::PostToolUse(e) => assert!(e.tool_result.is_some()),
             _ => panic!("wrong variant"),
         }
     }
