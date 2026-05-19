@@ -45,6 +45,7 @@ use serde::{Deserialize, Serialize};
 /// entirely absent file) works without any explicit `Option<_>` dance.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub approvals: Approvals,
@@ -56,15 +57,6 @@ pub struct Config {
     pub tokens: TokensConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            approvals: Approvals::default(),
-            emit: Emit::default(),
-            tokens: TokensConfig::default(),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // [approvals]
@@ -130,6 +122,7 @@ pub enum Fallback {
 /// `[emit]` — which emit back-ends are active.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct Emit {
     #[serde(default)]
     pub notify: NotifyConfig,
@@ -141,15 +134,6 @@ pub struct Emit {
     pub http: HttpConfig,
 }
 
-impl Default for Emit {
-    fn default() -> Self {
-        Self {
-            notify: NotifyConfig::default(),
-            ctrl: CtrlConfig::default(),
-            http: HttpConfig::default(),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // [emit.notify]

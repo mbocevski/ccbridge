@@ -185,6 +185,12 @@ pub struct FileOffsets {
     inner: HashMap<PathBuf, u64>,
 }
 
+impl Default for FileOffsets {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileOffsets {
     pub fn new() -> Self {
         Self { inner: HashMap::new() }
@@ -220,7 +226,6 @@ impl FileOffsets {
         match std::fs::File::open(path) {
             Err(e) => {
                 warn!("jsonl: open {} failed: {e}", path.display());
-                return;
             }
             Ok(mut file) => {
                 if let Err(e) = file.seek(SeekFrom::Start(*offset)) {

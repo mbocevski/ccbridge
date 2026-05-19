@@ -213,9 +213,8 @@ impl Pattern {
             }
 
             "Bash" => {
-                if args.ends_with(":*") {
-                    let prefix = args[..args.len() - 2].trim_end().to_owned();
-                    ArgMatcher::BashPrefix(prefix)
+                if let Some(prefix) = args.strip_suffix(":*") {
+                    ArgMatcher::BashPrefix(prefix.trim_end().to_owned())
                 } else {
                     ArgMatcher::Ambiguous
                 }
@@ -234,8 +233,8 @@ impl Pattern {
     fn parse_mcp(trimmed: &str, raw: &str) -> Self {
         // If the string ends with `*`, strip it and use as a prefix matcher.
         // Only a trailing `*` — mid-string wildcards are Unparseable.
-        if trimmed.ends_with('*') {
-            let prefix = trimmed[..trimmed.len() - 1].to_owned();
+        if let Some(without_star) = trimmed.strip_suffix('*') {
+            let prefix = without_star.to_owned();
             // Sanity check: prefix should still start with mcp__ after stripping.
             if prefix.starts_with("mcp__") {
                 return Self::McpPrefix {

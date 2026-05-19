@@ -26,6 +26,14 @@
 //! * `RecvError::Lagged` on the broadcast channel → skip, next heartbeat
 //!   arrives within 10 s.
 //! * `RecvError::Closed` (aggregator gone) → break, task exits cleanly.
+//!
+//! # Tests
+//!
+//! This module has no automated unit tests.  Testing `replaces_id` tracking,
+//! dismissed-set behaviour, and action routing requires a live
+//! `org.freedesktop.Notifications` DBus session, which is not available in CI.
+//! The state machine is small and has been verified manually plus through the
+//! heartbeat broadcast in `tests/full_flow.rs`.
 
 use std::collections::HashMap;
 

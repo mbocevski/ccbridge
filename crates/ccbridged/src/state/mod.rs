@@ -74,7 +74,7 @@ pub enum AggregatorMsg {
     ///   oneshot in `pending_approvals` and responds with
     ///   [`HookResponse::AwaitDecision`], which carries the receive side.
     HookEvent {
-        event: HookEvent,
+        event: Box<HookEvent>,
         respond: oneshot::Sender<HookResponse>,
     },
 
@@ -598,7 +598,7 @@ impl Aggregator {
                             break;
                         }
                         Some(AggregatorMsg::HookEvent { event, respond }) => {
-                            self.handle_hook_event(event, respond);
+                            self.handle_hook_event(*event, respond);
                         }
                         Some(AggregatorMsg::PermissionDecision { tool_use_id, decision }) => {
                             self.handle_permission_decision(tool_use_id, decision);
@@ -746,6 +746,7 @@ mod tests {
         })
     }
 
+    #[allow(dead_code)] // available for future tests that exercise PostToolUse handling
     fn post_tool_use_event(session_id: &str, tool_use_id: &str, tool: &str) -> HookEvent {
         HookEvent::PostToolUse(PostToolUseEvent {
             base: base(session_id),
@@ -1103,7 +1104,7 @@ mod tests {
 
         let (respond_tx, respond_rx) = oneshot::channel();
         tx.send(AggregatorMsg::HookEvent {
-            event: session_start_event("run-sess"),
+            event: Box::new(session_start_event("run-sess")),
             respond: respond_tx,
         })
         .await
@@ -1125,7 +1126,7 @@ mod tests {
         // Start a session.
         let (r1_tx, r1_rx) = oneshot::channel();
         tx.send(AggregatorMsg::HookEvent {
-            event: session_start_event("psess"),
+            event: Box::new(session_start_event("psess")),
             respond: r1_tx,
         })
         .await
@@ -1138,7 +1139,7 @@ mod tests {
         // Fire PreToolUse.
         let (r2_tx, r2_rx) = oneshot::channel();
         tx.send(AggregatorMsg::HookEvent {
-            event: pre_tool_use_event("psess", "toolu_run1", "Bash"),
+            event: Box::new(pre_tool_use_event("psess", "toolu_run1", "Bash")),
             respond: r2_tx,
         })
         .await
@@ -1209,7 +1210,7 @@ mod tests {
         // Trigger a state change.
         let (r_tx, r_rx) = oneshot::channel();
         tx.send(AggregatorMsg::HookEvent {
-            event: session_start_event("multi-sess"),
+            event: Box::new(session_start_event("multi-sess")),
             respond: r_tx,
         })
         .await

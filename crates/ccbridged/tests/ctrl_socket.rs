@@ -7,7 +7,7 @@
 //! 3. Connects as a ctrl client via `tokio::net::UnixStream`.
 //! 4. Exercises the protocol and asserts the responses.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ccbridge_proto::buddy::{Heartbeat, StatusAck, WireDecision};
@@ -51,13 +51,13 @@ async fn setup() -> (TempDir, ccbridged::state::AggregatorTx, PathBuf) {
     (dir, agg_tx, runtime_dir)
 }
 
-fn ctrl_sock_path(runtime_dir: &PathBuf) -> PathBuf {
+fn ctrl_sock_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("ccbridge").join("ctrl.sock")
 }
 
 /// Connect to the ctrl socket and return a split (reader, writer).
 async fn connect(
-    runtime_dir: &PathBuf,
+    runtime_dir: &Path,
 ) -> (
     BufReader<tokio::net::unix::OwnedReadHalf>,
     tokio::net::unix::OwnedWriteHalf,
@@ -175,7 +175,7 @@ async fn permission_command_resolves_approval() {
     let (respond_tx, respond_rx) = oneshot::channel();
     agg_tx
         .send(AggregatorMsg::HookEvent {
-            event: ccbridge_proto::hook::HookEvent::PreToolUse(
+            event: Box::new(ccbridge_proto::hook::HookEvent::PreToolUse(
                 ccbridge_proto::hook::PreToolUseEvent {
                     base: ccbridge_proto::hook::HookBase {
                         session_id: "ctrl-test-session".to_owned(),
@@ -190,7 +190,7 @@ async fn permission_command_resolves_approval() {
                     agent_id: None,
                     agent_type: None,
                 },
-            ),
+            )),
             respond: respond_tx,
         })
         .await
@@ -328,7 +328,7 @@ async fn subscribed_client_receives_heartbeats() {
     let (respond_tx, respond_rx) = oneshot::channel();
     agg_tx
         .send(AggregatorMsg::HookEvent {
-            event: ccbridge_proto::hook::HookEvent::SessionStart(
+            event: Box::new(ccbridge_proto::hook::HookEvent::SessionStart(
                 ccbridge_proto::hook::SessionStartEvent {
                     base: ccbridge_proto::hook::HookBase {
                         session_id: "hb-stream-test".to_owned(),
@@ -339,7 +339,7 @@ async fn subscribed_client_receives_heartbeats() {
                     model: "claude-test".to_owned(),
                     agent_type: None,
                 },
-            ),
+            )),
             respond: respond_tx,
         })
         .await

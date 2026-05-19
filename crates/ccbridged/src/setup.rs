@@ -167,7 +167,7 @@ pub fn merge_hooks(settings: &mut Value) -> Vec<HookMergeResult> {
             .as_array()
             .unwrap()
             .iter()
-            .any(|group| group_has_ccbridge_hook(group));
+            .any(group_has_ccbridge_hook);
 
         if already {
             results.push(HookMergeResult { event, action: HookAction::AlreadyPresent });

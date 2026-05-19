@@ -14,7 +14,7 @@
 //! wires all four components into a single `TempDir`.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -83,12 +83,12 @@ async fn setup_full(approval_timeout: Duration) -> FullSetup {
 // Helpers (mirrors ctrl_socket.rs / hook_ingest.rs patterns)
 // ---------------------------------------------------------------------------
 
-fn ctrl_sock_path(runtime_dir: &PathBuf) -> PathBuf {
+fn ctrl_sock_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("ccbridge").join("ctrl.sock")
 }
 
 async fn ctrl_connect(
-    runtime_dir: &PathBuf,
+    runtime_dir: &Path,
 ) -> (BufReader<tokio::net::unix::OwnedReadHalf>, tokio::net::unix::OwnedWriteHalf) {
     let stream = UnixStream::connect(ctrl_sock_path(runtime_dir))
         .await
@@ -236,7 +236,7 @@ async fn golden_path() {
     // ── 4. Wait for waiting=1 and send permission ────────────────────────────
     let hb = wait_for_heartbeat(&mut ctrl_r, |hb| {
         hb.waiting == 1
-            && hb.prompt.as_ref().map_or(false, |p| p.id == tool_use_id)
+            && hb.prompt.as_ref().is_some_and(|p| p.id == tool_use_id)
     })
     .await;
     assert_eq!(hb.waiting, 1);

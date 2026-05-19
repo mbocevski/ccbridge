@@ -3,7 +3,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ccbridge_proto::buddy::Heartbeat;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -100,3 +99,4 @@ async fn post_status_returns_404() {
         .unwrap_or(0);
     assert_eq!(status, 404);
 }
+

@@ -7,7 +7,7 @@
 //! 3. Connects as a mock hook binary via `tokio::net::UnixStream`.
 //! 4. Writes a hook-event JSON line and reads the response (if any).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ccbridge_proto::buddy::WireDecision;
@@ -45,12 +45,12 @@ async fn setup(
     (dir, agg_tx, runtime_dir)
 }
 
-fn sock_path(runtime_dir: &PathBuf) -> PathBuf {
+fn sock_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("ccbridge").join("hooks.sock")
 }
 
 /// Connect to the hook socket and return a split reader/writer.
-async fn connect(runtime_dir: &PathBuf) -> (
+async fn connect(runtime_dir: &Path) -> (
     BufReader<tokio::net::unix::OwnedReadHalf>,
     tokio::net::unix::OwnedWriteHalf,
 ) {

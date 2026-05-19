@@ -141,7 +141,7 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
     let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
     if agg_tx
         .send(AggregatorMsg::HookEvent {
-            event,
+            event: Box::new(event),
             respond: respond_tx,
         })
         .await
