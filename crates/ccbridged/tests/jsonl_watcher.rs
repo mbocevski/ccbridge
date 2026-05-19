@@ -82,7 +82,7 @@ async fn watcher_picks_up_new_lines() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(ccbridged::permission::Allowlist::empty()));
+    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
 
     // Start watcher (snapshots existing files — dir is empty, offset = 0).
     spawn_watcher(
@@ -115,7 +115,7 @@ async fn watcher_ignores_non_assistant_lines() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(ccbridged::permission::Allowlist::empty()));
+    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
     spawn_watcher(
         projects_dir.clone(),
         state_path,
@@ -143,7 +143,7 @@ async fn watcher_tolerates_malformed_lines() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(ccbridged::permission::Allowlist::empty()));
+    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
     spawn_watcher(
         projects_dir.clone(),
         state_path,
@@ -172,7 +172,7 @@ async fn watcher_ignores_non_jsonl_files() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(ccbridged::permission::Allowlist::empty()));
+    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
     spawn_watcher(
         projects_dir.clone(),
         state_path,
@@ -201,7 +201,7 @@ async fn watcher_loads_initial_token_state() {
     let projects_dir = dir.path().to_path_buf();
     let state_path = dir.path().join("tokens.json");
 
-    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(ccbridged::permission::Allowlist::empty()));
+    let (agg_tx, _hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(ccbridged::permission::Allowlist::empty()))));
 
     // Simulate a prior daemon run with 10_000 cumulative tokens.
     let initial = PersistedTokens {

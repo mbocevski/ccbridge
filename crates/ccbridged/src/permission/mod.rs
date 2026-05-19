@@ -18,7 +18,9 @@
 //! as [`Decision::AskAnnotated`].
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use ccbridge_proto::hook::{PermissionMode, PreToolUseEvent};
 
 pub mod allowlist;
@@ -80,6 +82,117 @@ pub fn settings_path() -> PathBuf {
         .map(PathBuf::from)
         .expect("$HOME must be set");
     home.join(".claude").join("settings.json")
+}
+
+// ---------------------------------------------------------------------------
+// spawn_settings_watcher()
+// ---------------------------------------------------------------------------
+
+/// Spawn a task that watches `settings_path` for changes and atomically
+/// replaces the in-memory allowlist via [`ArcSwap`].
+///
+/// # Behavior on file change
+///
+/// - Parse succeeds → `allowlist.store(Arc::new(new))`. Log info with new counts.
+/// - Parse fails (settings.json transiently broken during an editor save) →
+///   log `warn!`, **keep the old allowlist**.  We never silently lose deny-list
+///   enforcement because of a partial file write.
+///
+/// # Portability
+///
+/// Watches the **parent directory** of `settings_path` rather than the file
+/// directly.  `notify` can be unreliable when watching a file that gets
+/// atomically replaced (rename-on-write, which editors use) — watching the
+/// parent and filtering events is the portable pattern.
+///
+/// Uses the same sync-notify→async-tokio bridge as `ingest::jsonl`.
+pub fn spawn_settings_watcher(
+    settings_path: PathBuf,
+    allowlist: Arc<ArcSwap<Allowlist>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(e) = run_settings_watcher(settings_path, allowlist).await {
+            tracing::error!("settings watcher exited with error: {e:#}");
+        }
+    })
+}
+
+async fn run_settings_watcher(
+    settings_path: PathBuf,
+    allowlist: Arc<ArcSwap<Allowlist>>,
+) -> anyhow::Result<()> {
+    use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::sync::mpsc as std_mpsc;
+
+    // Watch the parent directory — see function doc.
+    let watch_dir = settings_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("settings_path has no parent"))?
+        .to_path_buf();
+
+    let (ev_tx, ev_rx) = std_mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = RecommendedWatcher::new(ev_tx, Config::default())
+        .map_err(|e| anyhow::anyhow!("create watcher: {e}"))?;
+    watcher
+        .watch(&watch_dir, RecursiveMode::NonRecursive)
+        .map_err(|e| anyhow::anyhow!("watch {}: {e}", watch_dir.display()))?;
+
+    tracing::info!(
+        path = %settings_path.display(),
+        "settings watcher started",
+    );
+
+    loop {
+        // Drain all pending notify events.
+        loop {
+            match ev_rx.try_recv() {
+                Ok(Ok(event)) => {
+                    use notify::EventKind;
+                    let relevant = matches!(
+                        event.kind,
+                        EventKind::Modify(_) | EventKind::Create(_)
+                    );
+                    if !relevant {
+                        continue;
+                    }
+                    // Filter to the specific settings.json path.
+                    let touches_settings = event
+                        .paths
+                        .iter()
+                        .any(|p| p == &settings_path);
+                    if !touches_settings {
+                        continue;
+                    }
+                    // Re-parse and swap.
+                    match Allowlist::from_path(&settings_path) {
+                        Ok(new) => {
+                            tracing::info!(
+                                allow_patterns = new.allow.len(),
+                                deny_patterns = new.deny.len(),
+                                "settings.json changed — reloaded allowlist",
+                            );
+                            allowlist.store(Arc::new(new));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "settings.json changed but is invalid ({e:#}) — \
+                                 keeping previous allowlist",
+                            );
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("settings watcher notify error: {e}");
+                }
+                Err(std_mpsc::TryRecvError::Empty) => break,
+                Err(std_mpsc::TryRecvError::Disconnected) => {
+                    tracing::debug!("settings watcher channel closed — exiting");
+                    return Ok(());
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -403,5 +516,69 @@ mod tests {
             json!({"file_path": "/home/user/.env.production"}),
         );
         assert!(matches!(evaluate(&e, &al), Decision::Deny { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Hot-reload watcher tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn settings_watcher_picks_up_changes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Initial: empty settings.
+        std::fs::write(&path, r#"{}"#).unwrap();
+        let allowlist = Arc::new(ArcSwap::new(Arc::new(Allowlist::empty())));
+        let _handle = spawn_settings_watcher(path.clone(), allowlist.clone());
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(allowlist.load().allow.len(), 0, "initial allowlist must be empty");
+
+        // Update file to add one allow pattern.
+        std::fs::write(&path, r#"{"permissions":{"allow":["Skill"]}}"#).unwrap();
+
+        // Poll until the watcher picks up the change (max 2s).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if allowlist.load().allow.len() == 1 {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("settings watcher did not pick up the change within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(allowlist.load().allow.len(), 1);
+        assert_eq!(allowlist.load().allow[0].raw(), "Skill");
+    }
+
+    #[tokio::test]
+    async fn settings_watcher_keeps_previous_on_malformed_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Initial: valid settings with one allow pattern.
+        std::fs::write(&path, r#"{"permissions":{"allow":["Skill"]}}"#).unwrap();
+        let initial = Allowlist::from_path(&path).unwrap();
+        let allowlist = Arc::new(ArcSwap::new(Arc::new(initial)));
+        let _handle = spawn_settings_watcher(path.clone(), allowlist.clone());
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(allowlist.load().allow.len(), 1, "pre-condition: one allow pattern");
+
+        // Overwrite with invalid JSON (simulates an editor mid-save).
+        std::fs::write(&path, b"not valid json at all").unwrap();
+
+        // Wait long enough for the watcher to see the change.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // The allowlist must still have the original pattern — never lose deny enforcement.
+        assert_eq!(
+            allowlist.load().allow.len(),
+            1,
+            "malformed settings.json must not clear the allowlist"
+        );
     }
 }

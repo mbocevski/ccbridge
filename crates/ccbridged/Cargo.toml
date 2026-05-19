@@ -42,6 +42,8 @@ futures-lite = "2"
 notify = "6"
 # Glob matching for permission patterns (e.g. Read(**/.env*))
 globset = "0.4"
+# Lock-free shared allowlist — Phase 2b hot-reload
+arc-swap = "1"
 # Local time for daily reset (daemon-specific)
 time = { version = "0.3", features = ["local-offset", "macros", "formatting"] }
 # Signal Type=notify readiness to systemd. Tiny crate, no transitives.

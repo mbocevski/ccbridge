@@ -31,6 +31,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
+use arc_swap::ArcSwap;
+
 use crate::permission::{AllowOrDeny, Allowlist};
 
 // ---------------------------------------------------------------------------
@@ -230,8 +232,11 @@ pub struct Aggregator {
 
     /// Parsed `permissions.allow` / `.deny` from `~/.claude/settings.json`.
     ///
-    /// Loaded once at startup (Phase 2a).  Hot-reload via `ArcSwap` is Phase 2b.
-    allowlist: Arc<Allowlist>,
+    /// Wrapped in `ArcSwap` so the settings watcher can atomically swap in a
+    /// freshly-parsed allowlist without holding any lock on the hot path.
+    /// The outer `Arc` lets both the aggregator and the watcher task hold a
+    /// handle to the same `ArcSwap` without lifetime complications.
+    allowlist: Arc<ArcSwap<Allowlist>>,
 }
 
 /// Maximum number of transcript entries kept for the heartbeat `entries` field.
@@ -252,7 +257,7 @@ impl Aggregator {
     /// receiver that emit modules should subscribe to.
     pub fn new(
         approval_timeout: Duration,
-        allowlist: Arc<Allowlist>,
+        allowlist: Arc<ArcSwap<Allowlist>>,
     ) -> (Self, broadcast::Receiver<Heartbeat>) {
         let (hb_tx, hb_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let agg = Self {
@@ -361,7 +366,9 @@ impl Aggregator {
             HookEvent::PreToolUse(e) => {
                 use crate::permission::{self, Decision};
 
-                match permission::evaluate(&e, &self.allowlist) {
+                // Load the current allowlist snapshot (lock-free).
+                let al = self.allowlist.load();
+                match permission::evaluate(&e, &al) {
                     Decision::Allow { reason } => {
                         debug!(
                             session_id = %e.base.session_id,
@@ -614,7 +621,7 @@ pub(crate) fn format_tool_hint(input: &serde_json::Value) -> String {
 /// before `run()` is called, or subscribe via the returned sender.
 pub fn spawn(
     approval_timeout: Duration,
-    allowlist: Arc<Allowlist>,
+    allowlist: Arc<ArcSwap<Allowlist>>,
 ) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
     let (agg, hb_rx) = Aggregator::new(approval_timeout, allowlist);
     let (tx, rx) = mpsc::channel(256);
@@ -708,7 +715,7 @@ mod tests {
     fn new_agg() -> Aggregator {
         let (agg, _rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
-            Arc::new(crate::permission::Allowlist::empty()),
+            Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))),
         );
         agg
     }
@@ -943,7 +950,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_responds_to_get_heartbeat() {
-        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
+        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
         drop(hb_rx); // not needed here
 
         let (respond_tx, respond_rx) = oneshot::channel();
@@ -957,7 +964,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_session_start_increments_total() {
-        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
+        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
         drop(hb_rx);
 
         let (respond_tx, respond_rx) = oneshot::channel();
@@ -979,7 +986,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_pre_tool_use_then_permission_decision() {
-        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
+        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
 
         // Start a session.
         let (r1_tx, r1_rx) = oneshot::channel();
@@ -1035,7 +1042,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_daily_reset_zeroes_today_keeps_cumulative() {
-        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
+        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
 
         tx.send(AggregatorMsg::TokensUpdate { output_tokens: 5_000 }).await.unwrap();
         tx.send(AggregatorMsg::TokensUpdate { output_tokens: 3_000 }).await.unwrap();
@@ -1060,7 +1067,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_multiple_subscribers_all_receive_heartbeat() {
-        let (tx, hb_rx1) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
+        let (tx, hb_rx1) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))));
         // Subscribe a second receiver before sending any messages.
         let mut hb_rx2 = hb_rx1.resubscribe();
         let mut hb_rx1 = hb_rx1;
