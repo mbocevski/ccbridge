@@ -1,5 +1,6 @@
 /target/
 /ccbridge/
 /src/
+/pkg/
 *.pkg.tar.zst
 *.pkg.tar.xz
