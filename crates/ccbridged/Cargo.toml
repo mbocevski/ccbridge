@@ -50,6 +50,8 @@ time = { version = "0.3", features = ["local-offset", "macros", "formatting"] }
 sd-notify = "0.4"
 # TOML config file parser
 toml = "0.8"
+# LRU cache for ProjectAllowlistCache (bounds inotify watcher growth)
+lru = "0.18"
 # HTTP /status endpoint for waybar custom modules
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }

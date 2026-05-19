@@ -8,9 +8,16 @@
 //! # Concurrency
 //!
 //! The user allowlist is behind an [`ArcSwap`] (lock-free reads, swapped by
-//! the user-file watcher).  Per-project entries are in a [`Mutex<HashMap>`];
+//! the user-file watcher).  Per-project entries are in a [`Mutex<LruCache>`];
 //! the lock is held only while looking up or inserting the entry — the
 //! expensive `cascade()` call happens with the lock released.
+//!
+//! # LRU bound
+//!
+//! The cache is capped at [`LRU_CAPACITY`] entries.  Each entry holds two
+//! inotify watchers (project and local settings files); evicting an entry
+//! explicitly aborts both tasks to release the inotify fds promptly rather
+//! than waiting for them to self-terminate.
 //!
 //! # Precondition
 //!
@@ -19,29 +26,41 @@
 //! The aggregator task satisfies this precondition.  Use `#[tokio::test]` for
 //! any test that triggers a cache miss.
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
+use lru::LruCache;
 
 use super::allowlist::Allowlist;
 use super::project::find_project_root;
 use super::spawn_settings_watcher;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of project roots held in the LRU cache simultaneously.
+///
+/// Each entry holds 2 inotify watchers (project + local settings files).
+/// At capacity = 64 the daemon uses at most 128 inotify watches out of the
+/// typical `fs.inotify.max_user_watches = 8192` kernel default.
+const LRU_CAPACITY: usize = 64;
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/// Lazily-populated cache of per-project allowlists, cascaded with the shared
-/// user-global allowlist.
+/// Lazily-populated LRU cache of per-project allowlists, cascaded with the
+/// shared user-global allowlist.
 pub struct ProjectAllowlistCache {
     /// User-global allowlist (`~/.claude/settings.json`).
     /// Also held by the user-file watcher, which swaps it on change.
     user: Arc<ArcSwap<Allowlist>>,
 
-    /// Per-project entries keyed by project root path.
-    projects: Mutex<HashMap<PathBuf, ProjectEntry>>,
+    /// Per-project entries keyed by project root path, bounded by LRU_CAPACITY.
+    projects: Mutex<LruCache<PathBuf, ProjectEntry>>,
 }
 
 struct ProjectEntry {
@@ -49,9 +68,9 @@ struct ProjectEntry {
     project: Arc<ArcSwap<Allowlist>>,
     /// `<project_root>/.claude/settings.local.json`
     local: Arc<ArcSwap<Allowlist>>,
-    /// Held to keep watcher tasks alive (dropped when cache entry is dropped).
-    _project_watcher: tokio::task::JoinHandle<()>,
-    _local_watcher: tokio::task::JoinHandle<()>,
+    /// Watcher tasks — aborted on eviction to release inotify fds promptly.
+    project_watcher: tokio::task::JoinHandle<()>,
+    local_watcher: tokio::task::JoinHandle<()>,
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +86,20 @@ impl ProjectAllowlistCache {
     pub fn new(user: Arc<ArcSwap<Allowlist>>) -> Self {
         Self {
             user,
-            projects: Mutex::new(HashMap::new()),
+            projects: Mutex::new(LruCache::new(
+                NonZeroUsize::new(LRU_CAPACITY).expect("LRU_CAPACITY > 0"),
+            )),
+        }
+    }
+
+    /// Construct the cache with an explicit capacity.  Test helper.
+    #[cfg(test)]
+    fn with_capacity(user: Arc<ArcSwap<Allowlist>>, capacity: usize) -> Self {
+        Self {
+            user,
+            projects: Mutex::new(LruCache::new(
+                NonZeroUsize::new(capacity).expect("capacity > 0"),
+            )),
         }
     }
 
@@ -80,8 +112,11 @@ impl ProjectAllowlistCache {
     ///
     /// Lazily loads project files and spawns two notify watchers on the first
     /// encounter of each project root.  Subsequent calls for the same root are
-    /// a `Mutex` lock + `HashMap` lookup + two `Arc` clones before the lock is
-    /// released, followed by a lock-free cascade construction.
+    /// a `Mutex` lock + LRU lookup (which also promotes the entry) + two `Arc`
+    /// clones before the lock is released, followed by a lock-free cascade.
+    ///
+    /// When the cache is full, the least-recently-used entry is evicted and
+    /// its watcher tasks are aborted before the new entry is inserted.
     ///
     /// # Precondition
     ///
@@ -101,7 +136,13 @@ impl ProjectAllowlistCache {
         // Acquire lock only long enough to get Arc handles — not during cascade.
         let (local_handle, project_handle) = {
             let mut guard = self.projects.lock().unwrap();
-            let entry = guard.entry(root.clone()).or_insert_with(|| {
+
+            // `get` promotes the entry in LRU order (records the access).
+            // `contains_key` would not promote; `get` is correct here.
+            if let Some(entry) = guard.get(&root) {
+                (Arc::clone(&entry.local), Arc::clone(&entry.project))
+            } else {
+                // Cache miss — load files and spawn watchers.
                 let proj_path = root.join(".claude").join("settings.json");
                 let local_path = root.join(".claude").join("settings.local.json");
 
@@ -120,14 +161,35 @@ impl ProjectAllowlistCache {
                     "allowlist cache: loaded project-local allowlists + spawned watchers",
                 );
 
-                ProjectEntry {
-                    project: project_al,
-                    local: local_al,
-                    _project_watcher: ph,
-                    _local_watcher: lh,
+                let new_entry = ProjectEntry {
+                    project: project_al.clone(),
+                    local: local_al.clone(),
+                    project_watcher: ph,
+                    local_watcher: lh,
+                };
+
+                // If the cache is at capacity, peek the LRU entry for logging,
+                // then insert (which evicts it and returns the evicted value).
+                let at_cap = guard.len() == guard.cap().get();
+                let evicted_root_for_log = if at_cap {
+                    guard.peek_lru().map(|(k, _)| k.clone())
+                } else {
+                    None
+                };
+
+                if let Some(evicted) = guard.put(root, new_entry) {
+                    evicted.project_watcher.abort();
+                    evicted.local_watcher.abort();
+                    if let Some(ref evicted_root) = evicted_root_for_log {
+                        tracing::debug!(
+                            evicted_root = %evicted_root.display(),
+                            "allowlist cache: evicted LRU entry, aborted watchers",
+                        );
+                    }
                 }
-            });
-            (Arc::clone(&entry.local), Arc::clone(&entry.project))
+
+                (local_al, project_al)
+            }
         };
         // Lock released before cascade — no blocking while iterating patterns.
 
@@ -142,6 +204,12 @@ impl ProjectAllowlistCache {
     #[cfg(test)]
     pub fn cached_project_count(&self) -> usize {
         self.projects.lock().unwrap().len()
+    }
+
+    /// Returns `true` if `root` is currently in the cache.  Test helper.
+    #[cfg(test)]
+    fn contains(&self, root: &Path) -> bool {
+        self.projects.lock().unwrap().contains(root)
     }
 }
 
@@ -176,6 +244,13 @@ mod tests {
         std::fs::write(dir.join(filename), serde_json::to_string(&v).unwrap()).unwrap();
     }
 
+    /// Create a TempDir with a `.claude/` subdirectory and return both.
+    fn make_project() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".claude")).unwrap();
+        dir
+    }
+
     // -----------------------------------------------------------------------
     // Test 1 — sync (no watchers spawned, cwd has no project root)
     // -----------------------------------------------------------------------
@@ -199,9 +274,8 @@ mod tests {
 
     #[tokio::test]
     async fn cascade_for_project_loads_both_files() {
-        let dir = TempDir::new().unwrap();
+        let dir = make_project();
         let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir(&claude_dir).unwrap();
 
         write_settings(&claude_dir, "settings.json", &[], &["Bash(rm:*)"]);
         write_settings(
@@ -232,9 +306,8 @@ mod tests {
 
     #[tokio::test]
     async fn cascade_for_project_with_only_local() {
-        let dir = TempDir::new().unwrap();
+        let dir = make_project();
         let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir(&claude_dir).unwrap();
 
         // Only settings.local.json — no settings.json.
         write_settings(&claude_dir, "settings.local.json", &["Bash(echo hi)"], &[]);
@@ -254,9 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn cascade_for_project_with_no_files() {
-        let dir = TempDir::new().unwrap();
-        // .claude/ exists but no settings files.
-        std::fs::create_dir(dir.path().join(".claude")).unwrap();
+        let dir = make_project();
 
         let user = user_with_allow(&["Skill"]);
         let cache = ProjectAllowlistCache::new(user);
@@ -270,8 +341,7 @@ mod tests {
 
     #[tokio::test]
     async fn cascade_for_caches_entry() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join(".claude")).unwrap();
+        let dir = make_project();
 
         let user = user_with_allow(&[]);
         let cache = ProjectAllowlistCache::new(user);
@@ -290,9 +360,8 @@ mod tests {
     async fn evaluate_uses_project_local_deny() {
         use ccbridge_proto::hook::{HookBase, PermissionMode, PreToolUseEvent};
 
-        let dir = TempDir::new().unwrap();
+        let dir = make_project();
         let claude_dir = dir.path().join(".claude");
-        std::fs::create_dir(&claude_dir).unwrap();
 
         // Project-local deny: Bash(npm test)
         write_settings(&claude_dir, "settings.local.json", &[], &["Bash(npm test)"]);
@@ -322,5 +391,86 @@ mod tests {
             matches!(decision, super::super::Decision::Deny { .. }),
             "project-local deny must flow through evaluate() as Deny, got {decision:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // LRU eviction tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cache_evicts_least_recently_used_entry() {
+        // Capacity = 2: populate 3 distinct project roots, assert the first is evicted.
+        let dir_a = make_project();
+        let dir_b = make_project();
+        let dir_c = make_project();
+
+        let user = user_with_allow(&[]);
+        let cache = ProjectAllowlistCache::with_capacity(user, 2);
+
+        cache.cascade_for(dir_a.path()); // A inserted, LRU: [A]
+        cache.cascade_for(dir_b.path()); // B inserted, LRU: [A, B]
+        assert_eq!(cache.cached_project_count(), 2);
+
+        cache.cascade_for(dir_c.path()); // C inserted, A evicted, LRU: [B, C]
+        assert_eq!(cache.cached_project_count(), 2, "capacity must stay at 2");
+        assert!(
+            !cache.contains(dir_a.path()),
+            "A must have been evicted (LRU)"
+        );
+        assert!(cache.contains(dir_b.path()), "B must still be in cache");
+        assert!(cache.contains(dir_c.path()), "C must be in cache");
+    }
+
+    #[tokio::test]
+    async fn cache_re_inserts_after_eviction() {
+        // Evict A, then re-encounter it — must get a fresh entry.
+        let dir_a = make_project();
+        let dir_b = make_project();
+        let dir_c = make_project();
+
+        let user = user_with_allow(&[]);
+        let cache = ProjectAllowlistCache::with_capacity(user, 2);
+
+        cache.cascade_for(dir_a.path()); // A inserted
+        cache.cascade_for(dir_b.path()); // B inserted; LRU: [A, B]
+        cache.cascade_for(dir_c.path()); // C inserted; A evicted; LRU: [B, C]
+
+        assert!(
+            !cache.contains(dir_a.path()),
+            "A must be evicted before re-insert"
+        );
+
+        // Re-encounter A — must succeed and produce a valid cascade.
+        let cascade = cache.cascade_for(dir_a.path());
+        assert!(cascade.allow.is_empty()); // no patterns in project; user also empty
+        assert_eq!(cache.cached_project_count(), 2, "capacity must still be 2");
+        assert!(cache.contains(dir_a.path()), "A must be back in cache");
+    }
+
+    #[tokio::test]
+    async fn cache_lru_hit_promotes_entry() {
+        // Access order: A, B, A (promotes A), then insert C → B should be evicted, not A.
+        let dir_a = make_project();
+        let dir_b = make_project();
+        let dir_c = make_project();
+
+        let user = user_with_allow(&[]);
+        let cache = ProjectAllowlistCache::with_capacity(user, 2);
+
+        cache.cascade_for(dir_a.path()); // A inserted, LRU: [A]
+        cache.cascade_for(dir_b.path()); // B inserted, LRU: [A, B] — A is LRU
+        cache.cascade_for(dir_a.path()); // A hit → promoted, LRU: [B, A] — B is now LRU
+        cache.cascade_for(dir_c.path()); // C inserted → B evicted, LRU: [A, C]
+
+        assert_eq!(cache.cached_project_count(), 2);
+        assert!(
+            cache.contains(dir_a.path()),
+            "A must survive (was promoted before C inserted)"
+        );
+        assert!(
+            !cache.contains(dir_b.path()),
+            "B must be evicted (was LRU after A was promoted)"
+        );
+        assert!(cache.contains(dir_c.path()), "C must be in cache");
     }
 }
