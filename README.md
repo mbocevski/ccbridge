@@ -33,9 +33,19 @@ is safe.
 
 When Claude Code is about to run a tool that needs approval, a critical
 notification appears with the tool name and input hint. Click **Approve** to
-allow it or **Deny** to block it. If you ignore the notification, the
-approval timeout expires and Claude Code falls back to its own built-in TUI
-prompt (configurable — see `fallback` in Configuration below).
+allow it, **Deny** to block it, or **Always** to also add a specific
+allowlist entry to your `~/.claude/settings.json` so this exact operation
+auto-approves in the future. ccbridge picks the most-narrow pattern that
+matches (e.g. clicking Always on `Bash(git status)` adds `Bash(git status)`,
+not `Bash`). For tools where a specific pattern can't be auto-derived,
+ccbridge declines rather than risk a too-broad allowlist.
+
+If you click Always by mistake, run `ccbridged undo-last-allow` to remove
+the most-recently added pattern and restore the previous settings.
+
+If you ignore the notification, the approval timeout expires and Claude Code
+falls back to its own built-in TUI prompt (configurable — see `fallback` in
+Configuration below).
 
 ccbridge respects `permissions.allow` and `permissions.deny` entries in
 `~/.claude/settings.json`. Tool calls that confidently match an allow-list

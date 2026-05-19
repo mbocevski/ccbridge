@@ -116,6 +116,15 @@ pub enum AggregatorMsg {
     /// somehow arrives (race between timeout + emit module), the existing
     /// `handle_permission_decision` path logs a warn and discards it.
     ApprovalTimedOut { tool_use_id: ToolUseId },
+
+    /// User clicked "Always" on a swaync notification.  The aggregator
+    /// derives the most-conservative allowlist pattern for the pending event,
+    /// writes it to `settings.json`, and approves the current call.
+    ///
+    /// For tools where a specific pattern cannot be auto-derived (bare-tool
+    /// case), the call is denied with a helpful reason rather than risking
+    /// a too-broad pattern being silently written.
+    AllowlistAlways { tool_use_id: ToolUseId },
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +194,11 @@ pub struct Session {
     /// top-level sessions.  Surfaced in the heartbeat `PromptInfo` to
     /// disambiguate sub-agent prompts from main-session prompts.
     pub pending_agent_type: Option<String>,
+
+    /// Full event stashed for the "Always" flow: if the user clicks Always,
+    /// the aggregator needs `tool_input` (and `agent_type`) to derive the
+    /// most-conservative allowlist pattern.  Boxed to keep variant sizes even.
+    pub pending_event: Option<Box<ccbridge_proto::hook::PreToolUseEvent>>,
 }
 
 impl Session {
@@ -200,6 +214,7 @@ impl Session {
             pending_matched_pattern: None,
             pending_match_source: None,
             pending_agent_type: None,
+            pending_event: None,
         }
     }
 
@@ -212,6 +227,7 @@ impl Session {
         self.pending_matched_pattern = None;
         self.pending_match_source = None;
         self.pending_agent_type = None;
+        self.pending_event = None;
     }
 }
 
@@ -275,6 +291,14 @@ pub struct Aggregator {
     /// The outer `Arc` lets both the aggregator and the watcher task hold a
     /// handle to the same `ArcSwap` without lifetime complications.
     allowlist: Arc<ArcSwap<Allowlist>>,
+
+    /// Path to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`).
+    /// Used by `AllowlistAlways` to atomically write a new allow pattern.
+    settings_path: std::path::PathBuf,
+
+    /// Path to the allowlist audit log.
+    /// Used by `AllowlistAlways` to append an audit entry.
+    audit_log_path: std::path::PathBuf,
 }
 
 /// Maximum number of transcript entries kept for the heartbeat `entries` field.
@@ -297,6 +321,8 @@ impl Aggregator {
         approval_timeout: Duration,
         fallback: Fallback,
         allowlist: Arc<ArcSwap<Allowlist>>,
+        settings_path: std::path::PathBuf,
+        audit_log_path: std::path::PathBuf,
     ) -> (Self, broadcast::Receiver<Heartbeat>) {
         let (hb_tx, hb_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let agg = Self {
@@ -308,6 +334,8 @@ impl Aggregator {
             approval_timeout,
             fallback,
             allowlist,
+            settings_path,
+            audit_log_path,
         };
         (agg, hb_rx)
     }
@@ -545,6 +573,7 @@ impl Aggregator {
         session.pending_tool_name = Some(e.tool_name.clone());
         session.pending_tool_hint = Some(hint);
         session.pending_agent_type = e.agent_type.clone();
+        session.pending_event = Some(Box::new(e.clone()));
         if let Some((pattern, source)) = annotation {
             session.pending_matched_pattern = Some(pattern);
             session.pending_match_source = Some(source);
@@ -579,6 +608,64 @@ impl Aggregator {
             }
             None => {
                 warn!(tool_use_id = %tool_use_id, "no pending approval for this tool_use_id");
+            }
+        }
+    }
+
+    fn handle_allowlist_always(&mut self, tool_use_id: ToolUseId) {
+        use crate::permission::additions::{
+            derive_pattern, write_allow_pattern, AdditionMetadata, DerivedPattern,
+        };
+
+        // Look up the stashed PreToolUseEvent for this approval.
+        let event = self
+            .sessions
+            .values()
+            .find(|s| s.pending_tool_use_id.as_deref() == Some(&tool_use_id))
+            .and_then(|s| s.pending_event.as_deref().cloned());
+
+        let Some(event) = event else {
+            warn!(
+                tool_use_id = %tool_use_id,
+                "AllowlistAlways: no pending event found; ignoring",
+            );
+            return;
+        };
+
+        match derive_pattern(&event) {
+            DerivedPattern::Specific(pattern) => {
+                let metadata = AdditionMetadata {
+                    tool_use_id: tool_use_id.clone(),
+                    session_id: event.base.session_id.clone(),
+                    agent_type: event.agent_type.clone(),
+                };
+                match write_allow_pattern(
+                    &self.settings_path,
+                    &pattern,
+                    &self.audit_log_path,
+                    metadata,
+                ) {
+                    Ok(()) => info!(%pattern, "AllowlistAlways: wrote allow pattern"),
+                    Err(e) => warn!("AllowlistAlways: failed to write pattern: {e:#}"),
+                }
+                // Approve this specific call regardless of write success.
+                // Settings watcher will reload for future calls.
+                self.handle_permission_decision(tool_use_id, WireDecision::Once);
+            }
+            DerivedPattern::BareToolNeedsConfirmation { tool } => {
+                // A bare-tool pattern like `Bash` would allow ALL future Bash calls —
+                // almost certainly not what the user wants.  Deny this call with a
+                // clear reason rather than silently writing an overly broad pattern.
+                warn!(
+                    %tool,
+                    tool_use_id = %tool_use_id,
+                    "AllowlistAlways: no specific pattern derivable; denying",
+                );
+                // The deny reason is surfaced via HardDeny in handle_permission_decision
+                // path.  We re-use PermissionDecision(Deny) here; the swaync emitter
+                // will show the deny.  A future enhancement could surface a more
+                // specific error notification.
+                self.handle_permission_decision(tool_use_id, WireDecision::Deny);
             }
         }
     }
@@ -646,6 +733,9 @@ impl Aggregator {
                             }
                             self.broadcast_heartbeat();
                         }
+                        Some(AggregatorMsg::AllowlistAlways { tool_use_id }) => {
+                            self.handle_allowlist_always(tool_use_id);
+                        }
                     }
                 }
                 _ = tick.tick() => {
@@ -660,6 +750,41 @@ impl Aggregator {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Spawn the Aggregator with explicit settings and audit-log paths.
+///
+/// Used by the real daemon so `AllowlistAlways` writes to the right places.
+pub fn spawn_with_paths(
+    approval_timeout: Duration,
+    fallback: Fallback,
+    allowlist: Arc<ArcSwap<Allowlist>>,
+    settings_path: std::path::PathBuf,
+    audit_log_path: std::path::PathBuf,
+) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
+    let (agg, hb_rx) =
+        Aggregator::new(approval_timeout, fallback, allowlist, settings_path, audit_log_path);
+    let (tx, rx) = mpsc::channel(256);
+    tokio::spawn(agg.run(rx));
+    (tx, hb_rx)
+}
+
+/// Spawn the Aggregator with no-op paths for settings/audit.
+///
+/// Used by unit and integration tests where `AllowlistAlways` is either not
+/// exercised or given explicit temp-dir paths in the test body.
+pub fn spawn(
+    approval_timeout: Duration,
+    fallback: Fallback,
+    allowlist: Arc<ArcSwap<Allowlist>>,
+) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
+    spawn_with_paths(
+        approval_timeout,
+        fallback,
+        allowlist,
+        std::path::PathBuf::from("/dev/null"),
+        std::path::PathBuf::from("/dev/null"),
+    )
+}
+
 /// Extract a short hint from a tool_input JSON value for the heartbeat entries
 /// log and for `PromptInfo.hint`.
 pub(crate) fn format_tool_hint(input: &serde_json::Value) -> String {
@@ -673,23 +798,6 @@ pub(crate) fn format_tool_hint(input: &serde_json::Value) -> String {
         }
     }
     String::new()
-}
-
-/// Spawn the Aggregator as a tokio task.
-///
-/// Returns the [`AggregatorTx`] sender (clone it for each module that needs to
-/// send messages) and a [`broadcast::Receiver<Heartbeat>`] that the first emit
-/// module can use — subsequent modules should call [`Aggregator::subscribe`]
-/// before `run()` is called, or subscribe via the returned sender.
-pub fn spawn(
-    approval_timeout: Duration,
-    fallback: Fallback,
-    allowlist: Arc<ArcSwap<Allowlist>>,
-) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
-    let (agg, hb_rx) = Aggregator::new(approval_timeout, fallback, allowlist);
-    let (tx, rx) = mpsc::channel(256);
-    tokio::spawn(agg.run(rx));
-    (tx, hb_rx)
 }
 
 // ---------------------------------------------------------------------------
@@ -781,6 +889,8 @@ mod tests {
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
             Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))),
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
         );
         agg
     }
@@ -863,6 +973,8 @@ mod tests {
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
             Arc::new(ArcSwap::new(Arc::new(al))),
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
         );
 
         let (tx0, _) = oneshot::channel();
@@ -974,6 +1086,137 @@ mod tests {
             prompt.session_id.as_deref(),
             Some("sess-agent"),
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AllowlistAlways tests (use spawn_with_paths for real tempdir paths)
+    // -----------------------------------------------------------------------
+
+    fn new_agg_with_paths(
+        settings: &std::path::Path,
+        audit: &std::path::Path,
+    ) -> Aggregator {
+        let (agg, _rx) = Aggregator::new(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            Arc::new(ArcSwap::new(Arc::new(crate::permission::Allowlist::empty()))),
+            settings.to_path_buf(),
+            audit.to_path_buf(),
+        );
+        agg
+    }
+
+    #[test]
+    fn allowlist_always_writes_pattern() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let settings = dir.path().join("settings.json");
+        let audit = dir.path().join("audit.log");
+        std::fs::write(&settings, r#"{}"#).unwrap();
+
+        let mut agg = new_agg_with_paths(&settings, &audit);
+
+        let (tx0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess_always"), tx0);
+
+        // Fire a Bash PreToolUse — should derive "Bash(echo always_test)".
+        let event = HookEvent::PreToolUse(PreToolUseEvent {
+            base: HookBase {
+                session_id: "sess_always".to_owned(),
+                transcript_path: "/tmp/always.jsonl".to_owned(),
+                cwd: "/tmp".to_owned(),
+            },
+            permission_mode: PermissionMode::Default,
+            effort: None,
+            tool_name: "Bash".to_owned(),
+            tool_input: serde_json::json!({"command": "echo always_test"}),
+            tool_use_id: "toolu_always_01".to_owned(),
+            agent_id: None,
+            agent_type: None,
+        });
+        let (respond_tx, mut respond_rx) = oneshot::channel();
+        agg.handle_hook_event(event, respond_tx);
+
+        // Extract decision receiver from AwaitDecision.
+        let mut decision_rx = match respond_rx.try_recv().unwrap() {
+            HookResponse::AwaitDecision { rx, .. } => rx,
+            _ => panic!("expected AwaitDecision"),
+        };
+
+        // Trigger AllowlistAlways.
+        agg.handle_allowlist_always("toolu_always_01".to_owned());
+
+        // Decision should be Once (approved).
+        let decision = decision_rx.try_recv().expect("AllowlistAlways must fire Once");
+        assert_eq!(decision, WireDecision::Once);
+
+        // Pattern should be in settings.json.
+        let loaded = crate::setup::load_settings(&settings).unwrap();
+        let allow = loaded["permissions"]["allow"].as_array().unwrap();
+        assert!(
+            allow.iter().any(|v| v.as_str() == Some("Bash(echo always_test)")),
+            "pattern must be in settings.json allow list"
+        );
+    }
+
+    #[test]
+    fn allowlist_always_bare_tool_denies_with_reason() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let settings = dir.path().join("settings.json");
+        let audit = dir.path().join("audit.log");
+        std::fs::write(&settings, r#"{}"#).unwrap();
+
+        let mut agg = new_agg_with_paths(&settings, &audit);
+
+        let (tx0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess_bare"), tx0);
+
+        // WebSearch has no derivable specific pattern → BareToolNeedsConfirmation.
+        let event = HookEvent::PreToolUse(PreToolUseEvent {
+            base: HookBase {
+                session_id: "sess_bare".to_owned(),
+                transcript_path: "/tmp/bare.jsonl".to_owned(),
+                cwd: "/tmp".to_owned(),
+            },
+            permission_mode: PermissionMode::Default,
+            effort: None,
+            tool_name: "WebSearch".to_owned(),
+            tool_input: serde_json::json!({"query": "Rust tokio"}),
+            tool_use_id: "toolu_bare_01".to_owned(),
+            agent_id: None,
+            agent_type: None,
+        });
+        let (respond_tx, mut respond_rx) = oneshot::channel();
+        agg.handle_hook_event(event, respond_tx);
+
+        let mut decision_rx = match respond_rx.try_recv().unwrap() {
+            HookResponse::AwaitDecision { rx, .. } => rx,
+            _ => panic!("expected AwaitDecision"),
+        };
+
+        // Trigger AllowlistAlways for a bare tool.
+        agg.handle_allowlist_always("toolu_bare_01".to_owned());
+
+        // Should be denied (bare-tool guardrail).
+        let decision = decision_rx.try_recv().expect("AllowlistAlways must fire");
+        assert_eq!(decision, WireDecision::Deny, "bare-tool AllowlistAlways must deny");
+
+        // No pattern should be written.
+        let loaded = crate::setup::load_settings(&settings).unwrap();
+        let allow = loaded.get("permissions").and_then(|p| p.get("allow"));
+        assert!(
+            allow.map(|a| a.as_array().map(|arr| arr.is_empty()).unwrap_or(true))
+                .unwrap_or(true),
+            "bare-tool AllowlistAlways must not write any pattern"
+        );
+    }
+
+    #[test]
+    fn allowlist_always_unknown_tool_use_id_no_panic() {
+        let mut agg = new_agg();
+        // Should log a warning and return without panic.
+        agg.handle_allowlist_always("toolu_nonexistent".to_owned());
     }
 
     #[test]

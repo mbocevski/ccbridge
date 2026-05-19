@@ -251,11 +251,21 @@ fn fallback_response(fallback: Fallback) -> (PermissionDecision, Option<String>)
     }
 }
 
-/// The reason string sent back to Claude Code when a user explicitly denies a
-/// tool call.  Centralised here so it has one place to edit.
-const USER_DENY_REASON: &str = "User explicitly denied this tool call via ccbridge. \
-                                 Do not retry with alternative approaches; ask the user \
-                                 what to do instead.";
+/// The reason string sent back to Claude Code on a `Deny` decision.
+///
+/// This covers two cases:
+/// 1. The user explicitly clicked Deny in the notification.
+/// 2. The user clicked Always but the tool has no auto-derivable specific
+///    pattern (bare-tool guardrail) — ccbridge denied to prevent an overly
+///    broad allowlist entry from being written.
+///
+/// Both cases share the same intent from Claude's perspective: do not retry
+/// silently; surface alternatives to the user.
+const USER_DENY_REASON: &str = "ccbridge denied this tool call. \
+                                 Either the user clicked Deny, or the tool's \
+                                 allowlist pattern would have been overly broad. \
+                                 Ask the user what to do; do not retry with \
+                                 alternative approaches.";
 
 /// Map a `WireDecision` to the `Option<String>` reason Claude Code sees on the wire.
 ///

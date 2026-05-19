@@ -345,6 +345,7 @@ async fn handle_heartbeat(
             let actions: &[&str] = &[
                 "default", "Approve once",
                 "once",    "Approve once",
+                "always",  "Always",
                 "deny",    "Deny",
             ];
 
@@ -435,17 +436,6 @@ async fn handle_action(
         }
     };
 
-    let decision = match action_key {
-        "default" | "once" => WireDecision::Once,
-        "deny" => WireDecision::Deny,
-        other => {
-            debug!(notif_id, action_key = other, "notify: unknown action key — ignoring");
-            // Put it back: we consumed it from the map but didn't act.
-            active.insert(notif_id, tool_use_id);
-            return;
-        }
-    };
-
     debug!(
         notif_id,
         tool_use_id = %tool_use_id,
@@ -453,13 +443,37 @@ async fn handle_action(
         "notify: user actioned notification",
     );
 
-    // Send the decision to the aggregator.
-    let _ = agg_tx
-        .send(AggregatorMsg::PermissionDecision {
-            tool_use_id,
-            decision,
-        })
-        .await;
+    match action_key {
+        "default" | "once" => {
+            let _ = agg_tx
+                .send(AggregatorMsg::PermissionDecision {
+                    tool_use_id,
+                    decision: WireDecision::Once,
+                })
+                .await;
+        }
+        "always" => {
+            // Tell the aggregator to derive + write the allow pattern, then
+            // approve this call.
+            let _ = agg_tx
+                .send(AggregatorMsg::AllowlistAlways { tool_use_id })
+                .await;
+        }
+        "deny" => {
+            let _ = agg_tx
+                .send(AggregatorMsg::PermissionDecision {
+                    tool_use_id,
+                    decision: WireDecision::Deny,
+                })
+                .await;
+        }
+        other => {
+            debug!(notif_id, action_key = other, "notify: unknown action key — ignoring");
+            // Put it back: we consumed it from the map but didn't act.
+            active.insert(notif_id, tool_use_id);
+            return;
+        }
+    }
 
     // Close any remaining active notifications for the same prompt (there
     // should be at most one, but close_all is idempotent).

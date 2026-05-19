@@ -137,13 +137,22 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     let allowlist = Arc::new(ArcSwap::new(Arc::new(initial_allowlist)));
 
     // Watch settings.json for live edits (hot-reload).
-    spawn_settings_watcher(sp, allowlist.clone());
+    spawn_settings_watcher(sp.clone(), allowlist.clone());
+
+    // Resolve audit log path for AllowlistAlways.
+    let audit_log = ccbridged::permission::additions::audit_log_path()
+        .unwrap_or_else(|e| {
+            tracing::warn!("cannot resolve audit log path: {e:#}; AllowlistAlways audit disabled");
+            std::path::PathBuf::from("/dev/null")
+        });
 
     // Spawn the aggregator (single-writer state task + broadcast channel).
-    let (agg_tx, hb_rx) = spawn_aggregator(
+    let (agg_tx, hb_rx) = ccbridged::state::spawn_with_paths(
         config.approvals.timeout(),
         config.approvals.fallback,
         allowlist,
+        sp,
+        audit_log,
     );
 
     // Spawn hook ingest socket.
