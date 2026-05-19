@@ -35,8 +35,20 @@ use std::path::{Path, PathBuf};
 /// The result is stable for the lifetime of a Claude Code session (cwd
 /// doesn't change), so callers should cache it per-session.
 pub fn find_project_root(cwd: &Path) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    find_project_root_with_home(cwd, home.as_deref())
+}
+
+/// Same as [`find_project_root`] but takes `home` explicitly so tests don't
+/// need to mutate `$HOME`.
+fn find_project_root_with_home(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let mut p: &Path = cwd;
     loop {
+        // Never treat $HOME itself as a project root — its `.claude/` is the
+        // user-global config dir, not a project marker.
+        if home == Some(p) {
+            return None;
+        }
         if p.join(".claude").is_dir() {
             return Some(p.to_path_buf());
         }
@@ -117,6 +129,23 @@ mod tests {
         assert!(
             result.is_none(),
             "no markers anywhere → expected None, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn find_project_root_skips_home_dotclaude() {
+        // Regression: cwd outside any project, with $HOME containing the
+        // user-global ~/.claude/ dir.  The walker must NOT treat $HOME as
+        // a project root just because of the user-global config dir.
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let cwd = home.path().join("dev").join("tmp");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let result = find_project_root_with_home(&cwd, Some(home.path()));
+        assert!(
+            result.is_none(),
+            "$HOME with .claude/ must not be treated as a project root, got {result:?}",
         );
     }
 
