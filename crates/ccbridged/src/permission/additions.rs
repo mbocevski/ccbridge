@@ -60,39 +60,47 @@ pub struct AdditionMetadata {
     pub agent_type: Option<String>,
 }
 
-/// Where an allowlist addition should be written.
+/// Where a NEW allow pattern is written — always project-local.
+///
+/// `write_allow_pattern` writes to `<root>/.claude/settings.local.json`,
+/// creating the `.claude/` directory if absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteTarget {
+pub struct WriteTarget {
+    /// Project root directory.  The settings file is `<root>/.claude/settings.local.json`.
+    pub root: std::path::PathBuf,
+}
+
+/// Where a HISTORIC audit-log entry pointed.
+///
+/// New entries are always `ProjectLocal`.  `UserGlobal` exists only for
+/// backwards compatibility with 6-column audit logs written by daemons
+/// predating the project-local rework (P3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditTarget {
     /// `<root>/.claude/settings.local.json`.
-    /// `.claude/` is created if it doesn't exist.
     ProjectLocal { root: std::path::PathBuf },
-    /// `~/.claude/settings.json` — user-global, never written by `Always`.
-    ///
-    /// Reserved for **audit-log backwards compatibility** only: legacy
-    /// 6-column entries (no target column) parse as `UserGlobal` so
-    /// `undo-last-allow` knows to remove the pattern from the right file.
-    /// New writes never produce this variant — `resolve_write_target`
-    /// always returns `ProjectLocal`.
+    /// `~/.claude/settings.json` — legacy 6-column audit lines only.
     UserGlobal,
+}
+
+impl From<&WriteTarget> for AuditTarget {
+    fn from(t: &WriteTarget) -> Self {
+        AuditTarget::ProjectLocal {
+            root: t.root.clone(),
+        }
+    }
 }
 
 /// Resolve the write target from a `cwd` path.
 ///
-/// `Always` never writes to user-global `~/.claude/settings.json` — that
-/// file is the user's own config and ccbridge stays out of it.  Instead:
-///
-/// - If `find_project_root` finds a real project root (an ancestor with
-///   `.claude/` or `.git`), write to `<root>/.claude/settings.local.json`.
-/// - Otherwise (no marker anywhere up the tree, including the `cwd == $HOME`
-///   case), treat `cwd` itself as the project root.  `write_allow_pattern`
-///   creates `<cwd>/.claude/` if absent and writes `settings.local.json`
-///   there.  When `cwd == $HOME`, this resolves to
-///   `~/.claude/settings.local.json` — alongside (not on top of) the
-///   user's own `settings.json`.
+/// - If `find_project_root` finds an ancestor with `.claude/` or `.git`,
+///   that ancestor becomes the project root.
+/// - Otherwise `cwd` itself is used as the root (creates
+///   `<cwd>/.claude/settings.local.json` on first write).
 pub fn resolve_write_target(cwd: &std::path::Path) -> WriteTarget {
     let root =
         crate::permission::project::find_project_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    WriteTarget::ProjectLocal { root }
+    WriteTarget { root }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,14 +172,8 @@ pub fn derive_pattern(event: &PreToolUseEvent) -> DerivedPattern {
 // Settings.json writer
 // ---------------------------------------------------------------------------
 
-/// Append `pattern` to the allowlist file specified by `target` and record
-/// the addition in the audit log.
-///
-/// - For `WriteTarget::ProjectLocal { root }`: writes to
-///   `<root>/.claude/settings.local.json`, creating `.claude/` if absent.
-/// - For `WriteTarget::UserGlobal`: writes to `~/.claude/settings.json`.
-///   This branch is never reached from the `Always` flow (which only
-///   produces `ProjectLocal`); it stays for exhaustiveness.
+/// Append `pattern` to `<target.root>/.claude/settings.local.json` and
+/// record the addition in the audit log.  Creates `.claude/` if absent.
 ///
 /// Idempotent: if the pattern is already present, returns `Ok(())`.
 pub fn write_allow_pattern(
@@ -180,14 +182,9 @@ pub fn write_allow_pattern(
     audit_log_path: &Path,
     metadata: AdditionMetadata,
 ) -> Result<()> {
-    let settings_path = match target {
-        WriteTarget::ProjectLocal { root } => {
-            let dir = root.join(".claude");
-            std::fs::create_dir_all(&dir).with_context(|| format!("mkdir -p {}", dir.display()))?;
-            dir.join("settings.local.json")
-        }
-        WriteTarget::UserGlobal => crate::permission::settings_path(),
-    };
+    let dir = target.root.join(".claude");
+    std::fs::create_dir_all(&dir).with_context(|| format!("mkdir -p {}", dir.display()))?;
+    let settings_path = dir.join("settings.local.json");
 
     let mut settings = load_settings(&settings_path)
         .with_context(|| format!("read {}", settings_path.display()))?;
@@ -224,14 +221,15 @@ pub fn write_allow_pattern(
         .with_context(|| format!("write {}", settings_path.display()))?;
 
     // Append audit log entry.
-    append_audit_entry(audit_log_path, "added", pattern, &metadata, target)?;
+    let audit_target = AuditTarget::from(target);
+    append_audit_entry(audit_log_path, "added", pattern, &metadata, &audit_target)?;
 
     tracing::info!(
         pattern = %pattern,
         tool_use_id = %metadata.tool_use_id,
         session = %short_id(&metadata.session_id),
         agent = ?metadata.agent_type,
-        ?target,
+        root = %target.root.display(),
         "allowlist: added pattern",
     );
 
@@ -261,8 +259,8 @@ pub fn undo_last_allow(audit_log_path: &Path) -> Result<()> {
 
     // Resolve path from the target stored in the audit log.
     let settings_path = match &entry.target {
-        WriteTarget::ProjectLocal { root } => root.join(".claude").join("settings.local.json"),
-        WriteTarget::UserGlobal => crate::permission::settings_path(),
+        AuditTarget::ProjectLocal { root } => root.join(".claude").join("settings.local.json"),
+        AuditTarget::UserGlobal => crate::permission::settings_path(),
     };
 
     let mut settings = load_settings(&settings_path)
@@ -345,7 +343,7 @@ fn append_audit_entry(
     op: &str,
     pattern: &str,
     metadata: &AdditionMetadata,
-    target: &WriteTarget,
+    target: &AuditTarget,
 ) -> Result<()> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -355,8 +353,8 @@ fn append_audit_entry(
     let session_short = short_id(&metadata.session_id);
     let agent = metadata.agent_type.as_deref().unwrap_or("");
     let target_col = match target {
-        WriteTarget::ProjectLocal { root } => format!("project:{}", root.display()),
-        WriteTarget::UserGlobal => "user".to_owned(),
+        AuditTarget::ProjectLocal { root } => format!("project:{}", root.display()),
+        AuditTarget::UserGlobal => "user".to_owned(),
     };
     let line = format!(
         "{ts}\t{op}\t{pattern}\t{tool_use_id}\t{session_short}\t{agent}\t{target_col}\n",
@@ -380,14 +378,14 @@ struct AuditEntry {
     tool_use_id: String,
     session_id: String,
     agent_type: Option<String>,
-    target: WriteTarget,
+    target: AuditTarget,
 }
 
 /// Find the most-recent `added` line in the audit log that has no subsequent
 /// `undone` line for the same pattern + tool_use_id pair.
 ///
 /// The 7th column (target) is parsed when present; missing column or
-/// unrecognised value → `WriteTarget::UserGlobal` (backwards compat with
+/// unrecognised value → `AuditTarget::UserGlobal` (backwards compat with
 /// 6-column logs from earlier daemon versions).
 fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
     if !log_path.exists() {
@@ -427,11 +425,11 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
                 let target = {
                     let raw = cols.get(6).copied().unwrap_or("user");
                     if let Some(path) = raw.strip_prefix("project:") {
-                        WriteTarget::ProjectLocal {
+                        AuditTarget::ProjectLocal {
                             root: std::path::PathBuf::from(path),
                         }
                     } else {
-                        WriteTarget::UserGlobal
+                        AuditTarget::UserGlobal
                     }
                 };
 
@@ -674,10 +672,7 @@ mod tests {
         let audit = dir.path().join("audit.log");
         std::fs::write(&settings, r#"{"theme":"dark"}"#).unwrap();
 
-        // Use UserGlobal target pointing at our temp settings file.
-        // (We can't use WriteTarget::UserGlobal directly since it resolves
-        // to ~/.claude/settings.json, so we test via ProjectLocal.)
-        let target = WriteTarget::ProjectLocal {
+        let target = WriteTarget {
             root: dir.path().to_path_buf(),
         };
         write_allow_pattern(&target, "Bash(git status)", &audit, meta()).unwrap();
@@ -693,7 +688,7 @@ mod tests {
     fn write_allow_pattern_idempotent() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal {
+        let target = WriteTarget {
             root: dir.path().to_path_buf(),
         };
 
@@ -710,7 +705,7 @@ mod tests {
     fn write_allow_pattern_writes_audit_log() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal {
+        let target = WriteTarget {
             root: dir.path().to_path_buf(),
         };
 
@@ -732,7 +727,7 @@ mod tests {
     fn undo_last_allow_removes_pattern() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal {
+        let target = WriteTarget {
             root: dir.path().to_path_buf(),
         };
 
@@ -778,7 +773,7 @@ mod tests {
     fn undo_last_allow_idempotent_when_pattern_already_gone() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal {
+        let target = WriteTarget {
             root: dir.path().to_path_buf(),
         };
 
@@ -802,7 +797,7 @@ mod tests {
         // No .claude/ dir yet.
         assert!(!dir.path().join(".claude").exists());
 
-        let target = WriteTarget::ProjectLocal {
+        let target = WriteTarget {
             root: dir.path().to_path_buf(),
         };
         write_allow_pattern(&target, "Bash(npm test)", &audit, meta()).unwrap();
@@ -820,7 +815,7 @@ mod tests {
     fn write_allow_pattern_project_local_records_target_in_audit() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal {
+        let target = WriteTarget {
             root: dir.path().to_path_buf(),
         };
 
@@ -835,11 +830,9 @@ mod tests {
     }
 
     #[test]
-    fn write_allow_pattern_user_global_records_user_target() {
-        // We can't write to the real user settings.json in tests,
-        // but we can build a fake UserGlobal that writes somewhere we control
-        // by mocking via ProjectLocal (or just test that the target encoding is right).
-        // Here we verify the 7th column encoding via a direct append_audit_entry call.
+    fn audit_entry_user_global_encodes_user_column() {
+        // Verify the 7th column encoding for the legacy UserGlobal audit target
+        // (written by undo_last_allow when replaying a legacy audit entry).
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
         let metadata = meta();
@@ -849,7 +842,7 @@ mod tests {
             "added",
             "Skill",
             &metadata,
-            &WriteTarget::UserGlobal,
+            &AuditTarget::UserGlobal,
         )
         .unwrap();
 
@@ -858,7 +851,7 @@ mod tests {
         assert_eq!(
             cols.get(6).copied(),
             Some("user"),
-            "7th column must be 'user'"
+            "7th column must be 'user' for AuditTarget::UserGlobal"
         );
     }
 
@@ -866,7 +859,7 @@ mod tests {
     fn undo_last_allow_target_aware_project_local() {
         let dir = TempDir::new().unwrap();
         let audit = dir.path().join("audit.log");
-        let target = WriteTarget::ProjectLocal {
+        let target = WriteTarget {
             root: dir.path().to_path_buf(),
         };
 
@@ -906,7 +899,7 @@ mod tests {
 
         let entry = find_last_undone_addition(&audit).unwrap().expect("entry");
         assert_eq!(entry.pattern, "Bash(legacy)");
-        assert!(matches!(entry.target, WriteTarget::UserGlobal));
+        assert!(matches!(entry.target, AuditTarget::UserGlobal));
     }
 
     #[test]
@@ -915,11 +908,9 @@ mod tests {
         // project root.  write_allow_pattern will create <cwd>/.claude/.
         let cwd = std::path::Path::new("/nonexistent-ccbridge-test-xyz/sub");
         let target = resolve_write_target(cwd);
-        match target {
-            WriteTarget::ProjectLocal { ref root } => {
-                assert_eq!(root, cwd);
-            }
-            other => panic!("expected ProjectLocal {{ root: cwd }}, got {other:?}"),
-        }
+        assert_eq!(
+            target.root, cwd,
+            "root must equal cwd when no project marker found"
+        );
     }
 }
