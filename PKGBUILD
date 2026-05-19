@@ -1,6 +1,7 @@
 # Maintainer: Marko Bocevski <marko.bocevski@gmail.com>
 pkgname=ccbridge-git
-pkgver=r15.g2778221
+# pkgver is computed dynamically by pkgver(); this static value is a placeholder.
+pkgver=0
 pkgrel=1
 pkgdesc="Claude Code hook aggregator — bridges Claude Code sessions to BLE/swaync/HTTP emitters"
 arch=('x86_64')

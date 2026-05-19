@@ -1,6 +1,6 @@
 pkgbase = ccbridge-git
 	pkgdesc = Claude Code hook aggregator — bridges Claude Code sessions to BLE/swaync/HTTP emitters
-	pkgver = r15.g2778221
+	pkgver = 0
 	pkgrel = 1
 	url = https://github.com/mbocevski/ccbridge
 	install = ccbridge.install
