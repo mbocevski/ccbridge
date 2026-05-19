@@ -57,3 +57,42 @@ http-body-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+
+# ---------------------------------------------------------------------------
+# Debian packaging (cargo-deb)
+# ---------------------------------------------------------------------------
+# Build command (no-build assumes `cargo build --release --workspace --locked`
+# has already run):
+#
+#   cargo install cargo-deb
+#   cargo build --release --workspace --locked
+#   cargo deb -p ccbridged --target x86_64-unknown-linux-gnu --no-build
+#
+# Output: target/x86_64-unknown-linux-gnu/debian/ccbridge_<version>_amd64.deb
+#
+# Asset paths are relative to this crate root (crates/ccbridged/).
+# ../../ resolves to the workspace/repo root.
+
+[package.metadata.deb]
+name = "ccbridge"
+maintainer = "Marko Bocevski <marko.bocevski@gmail.com>"
+copyright = "2026, Marko Bocevski <marko.bocevski@gmail.com>"
+license-file = ["../../LICENSE", "0"]
+extended-description = """
+ccbridge aggregates state across all running Claude Code sessions on this
+machine and surfaces approval prompts via freedesktop notifications (swaync,
+mako, dunst, GNOME, KDE) and a bidirectional control socket."""
+section = "utils"
+priority = "optional"
+depends = "$auto, libc6, libsystemd0"
+recommends = "swaync | mako-notifier | dunst | notification-daemon"
+maintainer-scripts = "../../debian/maintainer-scripts/"
+assets = [
+    ["target/release/ccbridged",                   "usr/bin/",                                        "755"],
+    ["../../target/release/ccbridge-hook",          "usr/bin/",                                        "755"],
+    ["../../contrib/systemd/ccbridge.service",      "usr/lib/systemd/user/ccbridge.service",           "644"],
+    ["../../README.md",                             "usr/share/doc/ccbridge/README.md",                "644"],
+    ["../../docs/control-protocol.md",              "usr/share/doc/ccbridge/control-protocol.md",      "644"],
+    ["../../docs/example-config.toml",              "usr/share/doc/ccbridge/example-config.toml",      "644"],
+    ["../../LICENSE",                               "usr/share/doc/ccbridge/copyright",                "644"],
+]

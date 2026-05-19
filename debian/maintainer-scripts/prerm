@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+case "$1" in
+    remove|purge)
+        # Do not disable per-user services from the package — per-user
+        # state (~/.claude/settings.json, systemctl --user) is not
+        # dpkg's business. Users can run `systemctl --user disable
+        # ccbridge` and re-run `ccbridged setup` if they reinstall.
+        ;;
+esac
+exit 0
