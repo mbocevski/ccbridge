@@ -153,6 +153,13 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
     // but a HashMap is future-proof and the close-all path is idempotent.
     let mut active: HashMap<u32, String> = HashMap::new();
 
+    // tool_use_ids the user has dismissed (closed without acting).
+    // When a heartbeat arrives for a prompt id in this set, we do NOT
+    // re-post the notification — the user already said "go away".
+    // The set is cleared when the prompt id changes (new prompt or no prompt).
+    let mut dismissed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_prompt_id: Option<String> = None;
+
     // The replaces_id we pass on the next Notify call.  Starts at 0 ("no
     // replacement").  After the first successful notify we keep it as the
     // last issued ID so new prompts replace rather than stack.
@@ -168,6 +175,8 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
                         hb,
                         &mut active,
                         &mut last_notif_id,
+                        &mut dismissed,
+                        &mut last_prompt_id,
                     ).await,
 
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -206,7 +215,7 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
                 match signal {
                     Some(sig) => {
                         if let Ok(args) = sig.args() {
-                            handle_closed(args.id, &mut active);
+                            handle_closed(args.id, &mut active, &mut dismissed);
                         }
                     }
                     None => {
@@ -232,9 +241,23 @@ async fn handle_heartbeat(
     hb: Heartbeat,
     active: &mut HashMap<u32, String>,
     last_notif_id: &mut u32,
+    dismissed: &mut std::collections::HashSet<String>,
+    last_prompt_id: &mut Option<String>,
 ) {
     match hb.prompt {
         Some(prompt) => {
+            // If the prompt id changed from the last heartbeat, clear the
+            // dismissed set — this is a new prompt the user hasn't seen yet.
+            if last_prompt_id.as_deref() != Some(&prompt.id) {
+                dismissed.clear();
+                *last_prompt_id = Some(prompt.id.clone());
+            }
+
+            // If the user already dismissed this notification, do not re-post.
+            if dismissed.contains(&prompt.id) {
+                return;
+            }
+
             // A permission prompt is pending.  Post (or replace) the notification.
             let summary = format!("Claude Code: approve {}?", prompt.tool);
             let body = prompt.hint.clone();
@@ -297,11 +320,13 @@ async fn handle_heartbeat(
             // ctrl socket) or the session resolved naturally.  Close everything.
             if !active.is_empty() {
                 debug!("swaync: prompt cleared externally — closing {} notification(s)", active.len());
-                // Forward the decision to the aggregator: send PermissionDecision
-                // is NOT done here — the other emitter already sent it.  We just
-                // close our own notifications.
                 close_all(proxy, active).await;
                 *last_notif_id = 0;
+            }
+            // Clear dismissed set and last_prompt_id: next prompt is fresh.
+            if last_prompt_id.is_some() {
+                dismissed.clear();
+                *last_prompt_id = None;
             }
         }
     }
@@ -367,16 +392,22 @@ async fn handle_action(
 // NotificationClosed handler
 // ---------------------------------------------------------------------------
 
-fn handle_closed(notif_id: u32, active: &mut HashMap<u32, String>) {
+fn handle_closed(
+    notif_id: u32,
+    active: &mut HashMap<u32, String>,
+    dismissed: &mut std::collections::HashSet<String>,
+) {
     if let Some(tool_use_id) = active.remove(&notif_id) {
-        // User dismissed without clicking an action.  Silent drop — not a
-        // decision, just a UI close event.  The approval timeout in
-        // ingest::hooks will eventually fire passthrough.
+        // User dismissed without clicking an action.
+        // Record the tool_use_id so the next heartbeat (which still carries
+        // the same prompt) does not immediately re-post the notification.
+        // The dismissed set is cleared when the prompt id changes or clears.
         debug!(
             notif_id,
             tool_use_id = %tool_use_id,
-            "swaync: notification dismissed without action",
+            "swaync: notification dismissed — suppressing re-post until prompt clears",
         );
+        dismissed.insert(tool_use_id);
     }
 }
 
