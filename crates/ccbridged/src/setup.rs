@@ -441,6 +441,39 @@ mod tests {
         assert_eq!(idle[0]["hooks"][0]["command"], "idle-handler");
     }
 
+    #[test]
+    fn merge_preserves_complex_unrelated_keys() {
+        // Real-world settings.json shapes: permissions, mcpServers, enabledPlugins, etc.
+        // Merge must add hooks without mangling any of these.
+        let mut s = json!({
+            "theme": "dark-ansi",
+            "permissions": {
+                "allow": ["Skill"],
+                "deny": ["Read(**/.env)"],
+                "ask": ["Bash"]
+            },
+            "mcpServers": {
+                "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]}
+            },
+            "enabledPlugins": ["foo", "bar"],
+            "tui": "fullscreen"
+        });
+        let results = merge_hooks(&mut s);
+        assert_eq!(results.len(), HOOK_EVENTS.len());
+
+        // All hook events added.
+        for event in HOOK_EVENTS {
+            assert!(s["hooks"][*event].is_array(), "{event} missing after merge");
+        }
+        // Every pre-existing key must survive untouched.
+        assert_eq!(s["theme"], "dark-ansi");
+        assert_eq!(s["permissions"]["ask"], json!(["Bash"]));
+        assert_eq!(s["permissions"]["allow"], json!(["Skill"]));
+        assert_eq!(s["mcpServers"]["context7"]["command"], "npx");
+        assert_eq!(s["enabledPlugins"], json!(["foo", "bar"]));
+        assert_eq!(s["tui"], "fullscreen");
+    }
+
     // -----------------------------------------------------------------------
     // load_settings / save_settings
     // -----------------------------------------------------------------------

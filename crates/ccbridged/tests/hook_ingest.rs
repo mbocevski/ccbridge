@@ -354,3 +354,56 @@ async fn unknown_hook_event_passthrough() {
     let line = recv_line(&mut reader).await;
     assert!(line.is_none(), "Unknown event should passthrough");
 }
+
+/// PreToolUse matching a deny-list pattern → `HardDeny` with reason containing
+/// the raw pattern string.
+///
+/// This exercises the end-to-end path:
+///   allowlist deny match → `Decision::Deny` → `HardDeny { reason }` →
+///   `pre_tool_use_response(Deny, Some(reason))` on the hook socket.
+#[tokio::test]
+async fn pre_tool_use_hard_deny_via_allowlist() {
+    use ccbridged::permission::{Allowlist, Pattern};
+
+    // Build an allowlist with "Bash(rm:*)" in the deny list.
+    let allowlist = Allowlist {
+        allow: vec![],
+        deny: vec![Pattern::parse("Bash(rm:*)")],
+    };
+    let al = std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(allowlist)));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(runtime_dir.join("ccbridge")).expect("mkdir ccbridge");
+    let (agg_tx, _hb_rx) = ccbridged::state::spawn(DEFAULT_APPROVAL_TIMEOUT, ccbridged::config::Fallback::default(), al);
+    ccbridged::ingest::hooks::spawn(runtime_dir.clone(), agg_tx.clone());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let (mut reader, mut writer) = connect(&runtime_dir).await;
+
+    // A Bash rm command — should match "Bash(rm:*)" confidently → HardDeny.
+    send_line(&mut writer, &json!({
+        "session_id": "sess_hd",
+        "transcript_path": "/tmp/sess_hd.jsonl",
+        "cwd": "/tmp",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "rm -rf /tmp/test"},
+        "tool_use_id": "toolu_hd_001"
+    })).await;
+
+    let line = recv_line(&mut reader).await.expect("HardDeny must produce a response");
+    let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    assert_eq!(
+        v["hookSpecificOutput"]["permissionDecision"],
+        "deny",
+        "deny-list match must produce 'deny'"
+    );
+    let reason = v["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("HardDeny must include permissionDecisionReason");
+    assert!(
+        reason.contains("Bash(rm:*)"),
+        "reason must name the matched pattern, got: {reason:?}"
+    );
+}

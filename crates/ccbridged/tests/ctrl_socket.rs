@@ -360,3 +360,65 @@ async fn subscribed_client_receives_heartbeats() {
 
     assert_eq!(hb.total, 1);
 }
+
+/// After unsubscribing from heartbeat, subsequent state changes must NOT
+/// deliver heartbeats to that client.
+///
+/// This tests the subscribe/unsubscribe symmetry: a client that unsubscribes
+/// should get the ack, then silence — even if other clients are receiving
+/// the same heartbeats.
+#[tokio::test]
+async fn unsubscribe_stops_heartbeat_delivery() {
+    let (_dir, agg_tx, runtime_dir) = setup().await;
+    let (mut reader, mut writer) = connect(&runtime_dir).await;
+
+    // Consume hello + initial snapshot.
+    let _: serde_json::Value = read_json(&mut reader).await;
+    let _: serde_json::Value = read_json(&mut reader).await;
+
+    // Subscribe to heartbeats.
+    write_json(&mut writer, &serde_json::json!({"cmd": "subscribe", "topics": ["heartbeat"]})).await;
+    let ack: Ack = read_json(&mut reader).await;
+    assert!(ack.ok, "subscribe ack must be ok");
+
+    // Trigger a state change — a heartbeat should arrive.
+    agg_tx
+        .send(AggregatorMsg::AddEntry { text: "before-unsub".to_owned() })
+        .await
+        .unwrap();
+    let hb = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let hb: Heartbeat = read_json(&mut reader).await;
+            return hb;
+        }
+    })
+    .await
+    .expect("heartbeat must arrive after subscribing");
+    let _ = hb; // consumed
+
+    // Now unsubscribe.
+    write_json(&mut writer, &serde_json::json!({"cmd": "unsubscribe", "topics": ["heartbeat"]})).await;
+    let ack: Ack = read_json(&mut reader).await;
+    assert!(ack.ok, "unsubscribe ack must be ok");
+
+    // Trigger another state change — this time NO heartbeat should arrive.
+    agg_tx
+        .send(AggregatorMsg::AddEntry { text: "after-unsub".to_owned() })
+        .await
+        .unwrap();
+
+    let no_hb = tokio::time::timeout(Duration::from_millis(300), async {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("read line");
+        line
+    })
+    .await;
+
+    assert!(
+        no_hb.is_err(),
+        "after unsubscribe, no heartbeat should arrive within 300ms"
+    );
+}
