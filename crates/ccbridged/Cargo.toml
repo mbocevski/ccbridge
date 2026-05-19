@@ -1,0 +1,32 @@
+[package]
+name = "ccbridged"
+description = "Claude Code aggregator bridge daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ccbridged"
+path = "src/main.rs"
+
+# Feature flags
+# -------------
+# ble  — BlueZ/bluer NUS peripheral emitter.  Enabled by default; Pixelbook
+#         builds pass --no-default-features because no BLE controller is exposed
+#         through Sommelier.  All other emit paths (swaync, ctrl, http) are
+#         always-on and do not require a feature flag.
+[features]
+default = ["ble"]
+ble = []
+
+[dependencies]
+ccbridge-proto = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

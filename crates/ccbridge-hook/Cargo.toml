@@ -1,0 +1,21 @@
+[package]
+name = "ccbridge-hook"
+description = "Tiny Claude Code hook shim — pipes hook stdin/stdout through the daemon socket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ccbridge-hook"
+path = "src/main.rs"
+
+[dependencies]
+ccbridge-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+# Note: intentionally no tokio — the hook must be synchronous and <5ms cold-start.
+# Full implementation: packaging task (not owned by core agent).

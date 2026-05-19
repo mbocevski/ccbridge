@@ -1,0 +1,63 @@
+//! ccbridged — Claude Code aggregator bridge daemon.
+//!
+//! Aggregates state across all running Claude Code sessions on this machine
+//! and re-emits the claude-desktop-buddy BLE wire protocol, swaync
+//! notifications, and a bidirectional control socket.
+//!
+//! # Socket directory
+//!
+//! The daemon binds sockets under `$XDG_RUNTIME_DIR/ccbridge/`.  That
+//! directory is **not** created by the daemon — it is provisioned by systemd
+//! via `RuntimeDirectory=ccbridge` in the unit file.  If the directory is
+//! absent when the daemon starts, `bind()` will fail loudly; that is an
+//! installation bug, not a runtime concern to paper over.
+//!
+//! # Feature flags
+//!
+//! * `ble` (default) — BlueZ/bluer NUS peripheral.  Pixelbook builds pass
+//!   `--no-default-features`; all other emit paths compile unconditionally.
+//!
+//! # Modules (stubs until their respective tasks are implemented)
+//!
+//! * `ingest::hooks`  — Unix socket listener for ccbridge-hook events
+//! * `ingest::jsonl`  — inotify-driven tail of ~/.claude/projects/**/*.jsonl
+//! * `state`          — Aggregator (single-writer task, mpsc fanout)
+//! * `emit::swaync`   — DBus notification emitter
+//! * `emit::ble`      — BlueZ NUS peripheral (feature = "ble")
+//! * `emit::ctrl`     — bidirectional control socket
+//! * `emit::http`     — optional HTTP /status (runtime-gated by config)
+//! * `config`         — config.toml loader
+
+use anyhow::Result;
+use tracing::info;
+
+mod config;
+mod emit;
+mod ingest;
+mod state;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("ccbridged=info".parse()?),
+        )
+        .init();
+
+    info!("ccbridged starting");
+
+    // TODO (task 362c957e): start hook ingest socket
+    // TODO (task 362c957e): start Aggregator
+    // TODO (task 27993d8d): start JSONL tail
+    // TODO (task 0432dcb9): wire approval flow
+    // TODO (task 1351d215): start control socket
+    // TODO (task 8564c3f5): load config
+
+    info!("ccbridged ready");
+
+    // Park the runtime until signalled.
+    tokio::signal::ctrl_c().await?;
+    info!("ccbridged shutting down");
+    Ok(())
+}
