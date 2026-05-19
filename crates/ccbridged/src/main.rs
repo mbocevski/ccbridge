@@ -31,8 +31,29 @@
 use anyhow::Result;
 use tracing::info;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() {
+    // Dispatch on the first argument — no clap dep needed for one subcommand.
+    match std::env::args().nth(1).as_deref() {
+        Some("setup") => ccbridged::setup::run(),
+        Some(other) => {
+            eprintln!("ccbridged: unknown subcommand {other:?}");
+            eprintln!("usage: ccbridged [setup]");
+            std::process::exit(1);
+        }
+        None => {
+            // Default: run as the daemon.
+            tokio::runtime::Runtime::new()
+                .expect("tokio runtime")
+                .block_on(daemon_main())
+                .unwrap_or_else(|e| {
+                    eprintln!("ccbridged: fatal: {e:#}");
+                    std::process::exit(1);
+                });
+        }
+    }
+}
+
+async fn daemon_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -51,7 +72,6 @@ async fn main() -> Result<()> {
 
     info!("ccbridged ready");
 
-    // Park the runtime until signalled.
     tokio::signal::ctrl_c().await?;
     info!("ccbridged shutting down");
     Ok(())

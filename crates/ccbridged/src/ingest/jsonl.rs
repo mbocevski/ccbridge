@@ -332,7 +332,7 @@ async fn run_watcher(
     agg_tx: AggregatorTx,
     initial_tokens: PersistedTokens,
 ) -> Result<()> {
-    use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+    use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
     use std::sync::mpsc as std_mpsc;
 
     // Initialise in-memory token state from the persisted file.
@@ -344,7 +344,7 @@ async fn run_watcher(
     //
     // TODO: plumb `DailyReset` acknowledgement back into the watcher so it can
     // update `current_date` without relying solely on the midnight-reset task.
-    let mut current_date = if initial_tokens.date.is_empty() {
+    let current_date = if initial_tokens.date.is_empty() {
         current_utc_date_string()
     } else {
         initial_tokens.date.clone()
