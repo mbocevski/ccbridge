@@ -722,7 +722,7 @@ mod tests {
             base: base(session_id),
             permission_mode: PermissionMode::Default,
             effort: None,
-            response: "done".to_owned(),
+            response: Some("done".to_owned()),
         })
     }
 

@@ -258,7 +258,12 @@ pub struct StopEvent {
     pub effort: Option<Effort>,
 
     /// The full text of Claude's response.
-    pub response: String,
+    ///
+    /// Per Claude Code's observed behavior, `response` is sometimes absent (e.g.
+    /// when the session stops with no assistant turn, or on timeout stops).
+    /// `serde(default)` treats a missing field as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +449,36 @@ mod tests {
             "response": "Done!"
         });
         let evt: HookEvent = serde_json::from_value(raw).unwrap();
-        assert!(matches!(evt, HookEvent::Stop(_)));
+        match &evt {
+            HookEvent::Stop(e) => {
+                assert_eq!(e.response.as_deref(), Some("Done!"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn round_trip_stop_without_response() {
+        // Real Claude Code sessions emit Stop events without a `response` field
+        // (e.g. timeout stops or sessions that end with no assistant turn).
+        // This must parse successfully — same pattern as PostToolUse.tool_result.
+        let raw = json!({
+            "session_id": "sess_04b",
+            "transcript_path": "/tmp/sess_04b.jsonl",
+            "cwd": "/tmp",
+            "permission_mode": "default",
+            "hook_event_name": "Stop"
+            // response intentionally absent
+        });
+        let evt: HookEvent = serde_json::from_value(raw).expect(
+            "Stop without response must parse successfully",
+        );
+        match &evt {
+            HookEvent::Stop(e) => {
+                assert!(e.response.is_none(), "absent response must be None");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
