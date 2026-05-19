@@ -66,18 +66,33 @@ pub enum WriteTarget {
     /// `<project_root>/.claude/settings.local.json`
     /// Created (including the `.claude/` directory) if it doesn't exist.
     ProjectLocal { root: std::path::PathBuf },
-    /// `~/.claude/settings.json` (user-global fallback).
+    /// `~/.claude/settings.json` (user-global fallback).  Only used when
+    /// `cwd` is `$HOME` itself — in every other case we make `cwd` a project
+    /// root by creating `.claude/` in it.
     UserGlobal,
 }
 
 /// Resolve the write target from a `cwd` path.
 ///
-/// Walks up from `cwd` via [`find_project_root`]; falls back to
-/// [`WriteTarget::UserGlobal`] when no project root is found.
+/// - If `find_project_root` finds a real project root (an ancestor with
+///   `.claude/` or `.git`), use it.
+/// - Otherwise, treat `cwd` itself as the project root — `write_allow_pattern`
+///   will create `<cwd>/.claude/` if absent.  This means clicking Always from
+///   a scratch directory bootstraps it as a Claude project rather than leaking
+///   the pattern into user-global config.
+/// - Edge case: `cwd == $HOME` falls back to [`WriteTarget::UserGlobal`] so
+///   we never silently overwrite the user's `~/.claude/` setup with a
+///   project-style file.
 pub fn resolve_write_target(cwd: &std::path::Path) -> WriteTarget {
-    match crate::permission::project::find_project_root(cwd) {
-        Some(root) => WriteTarget::ProjectLocal { root },
-        None => WriteTarget::UserGlobal,
+    if let Some(root) = crate::permission::project::find_project_root(cwd) {
+        return WriteTarget::ProjectLocal { root };
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    if home.as_deref() == Some(cwd) {
+        return WriteTarget::UserGlobal;
+    }
+    WriteTarget::ProjectLocal {
+        root: cwd.to_path_buf(),
     }
 }
 
@@ -894,10 +909,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_write_target_returns_user_global_for_unrooted_cwd() {
-        // No .claude/ or .git anywhere in the path → UserGlobal fallback.
-        let target =
-            resolve_write_target(std::path::Path::new("/nonexistent-ccbridge-test-xyz/sub"));
-        assert!(matches!(target, WriteTarget::UserGlobal));
+    fn resolve_write_target_uses_cwd_as_root_when_no_ancestor_marker() {
+        // No .claude/ or .git anywhere in the path → cwd itself becomes the
+        // project root.  write_allow_pattern will create <cwd>/.claude/.
+        let cwd = std::path::Path::new("/nonexistent-ccbridge-test-xyz/sub");
+        let target = resolve_write_target(cwd);
+        match target {
+            WriteTarget::ProjectLocal { ref root } => {
+                assert_eq!(root, cwd);
+            }
+            other => panic!("expected ProjectLocal {{ root: cwd }}, got {other:?}"),
+        }
     }
 }

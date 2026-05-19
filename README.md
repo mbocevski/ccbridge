@@ -37,8 +37,10 @@ allow it, **Deny** to block it, or **Always** to also add a specific
 allowlist entry so this exact operation auto-approves in the future.
 ccbridge writes to `<project>/.claude/settings.local.json` (project-local,
 gitignored by default) so approvals don't silently apply to every project
-you work on. If no project root is detected (no `.claude/` or `.git/`
-anywhere up the tree), it falls back to `~/.claude/settings.json`.
+you work on. The project root is the nearest ancestor of `cwd` that has
+`.claude/` or `.git`; if none is found, ccbridge bootstraps `cwd` itself
+as a project (creating `cwd/.claude/` if it doesn't exist) so a stray
+Always click never silently leaks into `~/.claude/settings.json`.
 ccbridge picks the most-narrow pattern that matches (e.g. clicking Always
 on `Bash(git status)` adds `Bash(git status)`, not `Bash`). For tools
 where a specific pattern can't be auto-derived, ccbridge declines rather

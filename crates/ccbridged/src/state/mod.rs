@@ -638,8 +638,7 @@ impl Aggregator {
                 if matches!(target, WriteTarget::UserGlobal) {
                     warn!(
                         cwd = %event.base.cwd,
-                        "AllowlistAlways: no project root found; \
-                         falling back to user-global write",
+                        "AllowlistAlways: cwd is $HOME; writing to user-global settings",
                     );
                 }
                 let metadata = AdditionMetadata {
