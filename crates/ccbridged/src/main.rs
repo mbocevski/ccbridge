@@ -18,6 +18,8 @@
 //! * `ble` (default) — BlueZ/bluer NUS peripheral.  Pixelbook builds pass
 //!   `--no-default-features`; all other emit paths compile unconditionally.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use tracing::info;
 
@@ -51,6 +53,7 @@ fn main() {
 async fn daemon_main(tz_offset: i32) -> Result<()> {
     use ccbridged::emit::{ctrl as ctrl_emit, notify as notify_emit};
     use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
+    use ccbridged::permission::{settings_path, Allowlist};
     use ccbridged::state::{spawn as spawn_aggregator, DEFAULT_APPROVAL_TIMEOUT};
 
     tracing_subscriber::fmt()
@@ -89,8 +92,31 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         "loaded token state",
     );
 
+    // Load allowlist from settings.json (best-effort; empty on first run or error).
+    let allowlist = {
+        let sp = settings_path();
+        match Allowlist::from_path(&sp) {
+            Ok(a) => {
+                info!(
+                    allow_patterns = a.allow.len(),
+                    deny_patterns = a.deny.len(),
+                    path = %sp.display(),
+                    "loaded allowlist from settings.json",
+                );
+                Arc::new(a)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to load allowlist from {}: {e:#} — proceeding with empty allowlist",
+                    sp.display(),
+                );
+                Arc::new(Allowlist::empty())
+            }
+        }
+    };
+
     // Spawn the aggregator (single-writer state task + broadcast channel).
-    let (agg_tx, hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT);
+    let (agg_tx, hb_rx) = spawn_aggregator(DEFAULT_APPROVAL_TIMEOUT, allowlist);
 
     // Spawn hook ingest socket.
     hook_ingest::spawn(runtime_dir.clone(), agg_tx.clone());

@@ -40,6 +40,8 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 futures-lite = "2"
 # JSONL tail filesystem watcher (daemon-specific, not shared via workspace)
 notify = "6"
+# Glob matching for permission patterns (e.g. Read(**/.env*))
+globset = "0.4"
 # Local time for daily reset (daemon-specific)
 time = { version = "0.3", features = ["local-offset", "macros", "formatting"] }
 # Signal Type=notify readiness to systemd. Tiny crate, no transitives.

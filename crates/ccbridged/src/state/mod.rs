@@ -22,6 +22,7 @@
 //! that's the right semantic; the next heartbeat will arrive within 10 s.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ccbridge_proto::buddy::{Heartbeat, PromptInfo, WireDecision};
@@ -29,6 +30,8 @@ use ccbridge_proto::hook::{HookEvent, PermissionMode};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
+
+use crate::permission::{AllowOrDeny, Allowlist};
 
 // ---------------------------------------------------------------------------
 // Public type aliases
@@ -143,6 +146,11 @@ pub struct Session {
     pub pending_tool_name: Option<String>,
     /// Short hint for the pending approval — displayed on BLE device screen.
     pub pending_tool_hint: Option<String>,
+    /// Phase 2+: the allowlist pattern that produced an `AskAnnotated` decision.
+    /// Stored for future use in annotation rendering (Phase 4).
+    pub pending_matched_pattern: Option<String>,
+    /// Phase 2+: which side of the allowlist the matched pattern came from.
+    pub pending_match_source: Option<AllowOrDeny>,
 }
 
 impl Session {
@@ -155,6 +163,8 @@ impl Session {
             pending_tool_use_id: None,
             pending_tool_name: None,
             pending_tool_hint: None,
+            pending_matched_pattern: None,
+            pending_match_source: None,
         }
     }
 
@@ -164,6 +174,8 @@ impl Session {
         self.pending_tool_use_id = None;
         self.pending_tool_name = None;
         self.pending_tool_hint = None;
+        self.pending_matched_pattern = None;
+        self.pending_match_source = None;
     }
 }
 
@@ -215,6 +227,11 @@ pub struct Aggregator {
     /// How long the ingest handler waits for an approval before falling back
     /// to passthrough.  Owned here so it is surfaced in tests.
     pub approval_timeout: Duration,
+
+    /// Parsed `permissions.allow` / `.deny` from `~/.claude/settings.json`.
+    ///
+    /// Loaded once at startup (Phase 2a).  Hot-reload via `ArcSwap` is Phase 2b.
+    allowlist: Arc<Allowlist>,
 }
 
 /// Maximum number of transcript entries kept for the heartbeat `entries` field.
@@ -233,7 +250,10 @@ pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_millis(30_000);
 impl Aggregator {
     /// Create a new [`Aggregator`] and return it together with the broadcast
     /// receiver that emit modules should subscribe to.
-    pub fn new(approval_timeout: Duration) -> (Self, broadcast::Receiver<Heartbeat>) {
+    pub fn new(
+        approval_timeout: Duration,
+        allowlist: Arc<Allowlist>,
+    ) -> (Self, broadcast::Receiver<Heartbeat>) {
         let (hb_tx, hb_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let agg = Self {
             sessions: HashMap::new(),
@@ -242,6 +262,7 @@ impl Aggregator {
             entries: VecDeque::with_capacity(ENTRIES_CAP),
             hb_tx,
             approval_timeout,
+            allowlist,
         };
         (agg, hb_rx)
     }
@@ -340,7 +361,7 @@ impl Aggregator {
             HookEvent::PreToolUse(e) => {
                 use crate::permission::{self, Decision};
 
-                match permission::evaluate(&e) {
+                match permission::evaluate(&e, &self.allowlist) {
                     Decision::Allow { reason } => {
                         debug!(
                             session_id = %e.base.session_id,
@@ -359,13 +380,18 @@ impl Aggregator {
                         );
                         let _ = respond.send(HookResponse::HardDeny { reason });
                     }
-                    Decision::AskAnnotated { .. } => {
-                        // Phase 2+: evaluate() never returns AskAnnotated yet.
-                        // Treat as Intercept for forward-compat.
-                        self.start_intercept(e, respond);
+                    Decision::AskAnnotated { matched_pattern, source } => {
+                        debug!(
+                            session_id = %e.base.session_id,
+                            tool = %e.tool_name,
+                            pattern = %matched_pattern,
+                            ?source,
+                            "PreToolUse ambiguous match — intercepting with annotation",
+                        );
+                        self.start_intercept(e, respond, Some((matched_pattern, source)));
                     }
                     Decision::Intercept => {
-                        self.start_intercept(e, respond);
+                        self.start_intercept(e, respond, None);
                     }
                 }
             }
@@ -435,13 +461,15 @@ impl Aggregator {
     /// marks the session as `waiting`, and returns [`HookResponse::AwaitDecision`]
     /// to the ingest handler, which drives the timeout loop.
     ///
-    /// This is extracted from `handle_hook_event` so that both
-    /// [`permission::Decision::Intercept`] and [`permission::Decision::AskAnnotated`]
-    /// (Phase 2+) can share the same implementation.
+    /// `annotation` is `Some((pattern, source))` when the decision came from
+    /// [`crate::permission::Decision::AskAnnotated`] — i.e., the allowlist had
+    /// a pattern that matched ambiguously.  The fields are stored on the session
+    /// for future annotation rendering (Phase 4).  Pass `None` for plain intercept.
     fn start_intercept(
         &mut self,
         e: ccbridge_proto::hook::PreToolUseEvent,
         respond: oneshot::Sender<HookResponse>,
+        annotation: Option<(String, AllowOrDeny)>,
     ) {
         let hint = format_tool_hint(&e.tool_input);
         debug!(
@@ -463,6 +491,10 @@ impl Aggregator {
         session.pending_tool_use_id = Some(e.tool_use_id.clone());
         session.pending_tool_name = Some(e.tool_name.clone());
         session.pending_tool_hint = Some(hint);
+        if let Some((pattern, source)) = annotation {
+            session.pending_matched_pattern = Some(pattern);
+            session.pending_match_source = Some(source);
+        }
 
         self.broadcast_heartbeat();
 
@@ -580,8 +612,11 @@ pub(crate) fn format_tool_hint(input: &serde_json::Value) -> String {
 /// send messages) and a [`broadcast::Receiver<Heartbeat>`] that the first emit
 /// module can use — subsequent modules should call [`Aggregator::subscribe`]
 /// before `run()` is called, or subscribe via the returned sender.
-pub fn spawn(approval_timeout: Duration) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
-    let (agg, hb_rx) = Aggregator::new(approval_timeout);
+pub fn spawn(
+    approval_timeout: Duration,
+    allowlist: Arc<Allowlist>,
+) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
+    let (agg, hb_rx) = Aggregator::new(approval_timeout, allowlist);
     let (tx, rx) = mpsc::channel(256);
     tokio::spawn(agg.run(rx));
     (tx, hb_rx)
@@ -671,7 +706,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn new_agg() -> Aggregator {
-        let (agg, _rx) = Aggregator::new(DEFAULT_APPROVAL_TIMEOUT);
+        let (agg, _rx) = Aggregator::new(
+            DEFAULT_APPROVAL_TIMEOUT,
+            Arc::new(crate::permission::Allowlist::empty()),
+        );
         agg
     }
 
@@ -905,7 +943,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_responds_to_get_heartbeat() {
-        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT);
+        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
         drop(hb_rx); // not needed here
 
         let (respond_tx, respond_rx) = oneshot::channel();
@@ -919,7 +957,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_session_start_increments_total() {
-        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT);
+        let (tx, hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
         drop(hb_rx);
 
         let (respond_tx, respond_rx) = oneshot::channel();
@@ -941,7 +979,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_pre_tool_use_then_permission_decision() {
-        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT);
+        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
 
         // Start a session.
         let (r1_tx, r1_rx) = oneshot::channel();
@@ -997,7 +1035,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_daily_reset_zeroes_today_keeps_cumulative() {
-        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT);
+        let (tx, mut hb_rx) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
 
         tx.send(AggregatorMsg::TokensUpdate { output_tokens: 5_000 }).await.unwrap();
         tx.send(AggregatorMsg::TokensUpdate { output_tokens: 3_000 }).await.unwrap();
@@ -1022,7 +1060,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_loop_multiple_subscribers_all_receive_heartbeat() {
-        let (tx, hb_rx1) = spawn(DEFAULT_APPROVAL_TIMEOUT);
+        let (tx, hb_rx1) = spawn(DEFAULT_APPROVAL_TIMEOUT, Arc::new(crate::permission::Allowlist::empty()));
         // Subscribe a second receiver before sending any messages.
         let mut hb_rx2 = hb_rx1.resubscribe();
         let mut hb_rx1 = hb_rx1;

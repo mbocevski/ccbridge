@@ -53,7 +53,7 @@ async fn setup_full(approval_timeout: Duration) -> FullSetup {
     std::fs::create_dir_all(&ccbridge_dir).expect("mkdir ccbridge");
     std::fs::create_dir_all(&projects_dir).expect("mkdir projects");
 
-    let (agg_tx, hb_rx) = spawn_aggregator(approval_timeout);
+    let (agg_tx, hb_rx) = spawn_aggregator(approval_timeout, std::sync::Arc::new(ccbridged::permission::Allowlist::empty()));
 
     ctrl_emit::spawn(
         runtime_dir.clone(),
