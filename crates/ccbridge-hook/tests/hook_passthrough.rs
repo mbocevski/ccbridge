@@ -120,6 +120,56 @@ fn round_trip_via_fake_daemon() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1b: stdin held open past timeout → hook exits 0 without wedging
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stdin_held_open_times_out_cleanly() {
+    use std::time::Instant;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // No socket — the hook should fall through to passthrough on stdin
+    // timeout, but the failure mode we're verifying is "doesn't wedge".
+    std::fs::create_dir_all(tmp.path().join("ccbridge")).unwrap();
+
+    let mut child = Command::new(hook_bin())
+        .env("XDG_RUNTIME_DIR", tmp.path())
+        // Tighten the budget so the test doesn't add 5s to the suite.
+        .env("CCBRIDGE_HOOK_STDIN_TIMEOUT_MS", "200")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn ccbridge-hook");
+
+    // Hold stdin open without writing — simulating Claude Code crashing
+    // or a PTY misbehaviour.  The hook must give up after the budget.
+    let stdin = child.stdin.take().unwrap();
+
+    let start = Instant::now();
+    let output = child.wait_with_output().unwrap();
+    let elapsed = start.elapsed();
+
+    // Drop the stdin handle after waiting, so it stays open during the run.
+    drop(stdin);
+
+    assert!(
+        output.status.success(),
+        "hook must exit 0 on stdin timeout, got: {:?}",
+        output.status,
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "hook must produce no stdout on stdin timeout, got: {:?}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "hook must exit within 2s of the 200ms budget, took {elapsed:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: no socket → exit 0, no stdout
 // ---------------------------------------------------------------------------
 

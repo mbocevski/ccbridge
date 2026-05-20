@@ -11,6 +11,7 @@
 
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::mpsc;
 use std::time::Duration;
 
 /// Timeout for connecting to and reading from the daemon socket.
@@ -19,6 +20,27 @@ use std::time::Duration;
 /// outlive it.  60 s is generous but harmless — Claude Code will have already
 /// handled the event long before this fires in the normal case.
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wall-clock budget for reading the event line from stdin.
+///
+/// Claude Code closes stdin promptly after writing the line, so this fires
+/// only when something upstream is broken (test harness left stdin open,
+/// PTY misbehaviour).  Without this cap the hook would wedge forever and
+/// stall whatever process is waiting on it.
+const STDIN_TIMEOUT_DEFAULT: Duration = Duration::from_secs(5);
+
+/// Maximum bytes accepted on stdin.  Mirrors the daemon's per-line cap so
+/// neither side has to buffer pathological inputs.
+const STDIN_MAX_BYTES: u64 = 1 << 20; // 1 MiB
+
+/// Resolve the stdin read timeout, allowing tests to override via env var.
+fn stdin_timeout() -> Duration {
+    std::env::var("CCBRIDGE_HOOK_STDIN_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(STDIN_TIMEOUT_DEFAULT)
+}
 
 fn main() {
     // Any error anywhere → exit 0 with no output (passthrough semantics).
@@ -36,10 +58,12 @@ fn run() -> Option<()> {
         p
     };
 
-    // ── 2. Read stdin ────────────────────────────────────────────────────────
-    // Claude Code writes exactly one JSON line.  Read the whole stdin buffer.
-    let mut input = String::new();
-    io::stdin().lock().read_to_string(&mut input).ok()?;
+    // ── 2. Read stdin (bounded + time-capped) ───────────────────────────────
+    // Claude Code writes exactly one JSON line and then closes stdin.  Two
+    // belts: cap the byte count via Read::take so a runaway producer can't
+    // exhaust memory, and put the read on a thread with a wall-clock
+    // deadline so a producer that forgets to close stdin can't wedge us.
+    let input = read_stdin_bounded(STDIN_MAX_BYTES, stdin_timeout())?;
     let input = input.trim_end_matches('\n').trim_end_matches('\r');
     if input.is_empty() {
         return None;
@@ -83,4 +107,39 @@ fn run() -> Option<()> {
     out.flush().ok()?;
 
     Some(())
+}
+
+/// Read up to `max_bytes` from stdin, giving up after `timeout`.
+///
+/// Returns `None` on timeout, I/O error, or oversized input — all of which
+/// trip the hook's passthrough semantics (caller exits 0 with no output).
+///
+/// The reader thread is intentionally orphaned on timeout: if stdin is wedged
+/// waiting on an upstream that never closes, the thread will sit blocked in
+/// the kernel until the process exits anyway.  That's fine for a short-lived
+/// shim — the OS reaps it on exit.
+fn read_stdin_bounded(max_bytes: u64, timeout: Duration) -> Option<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let result = io::stdin()
+            .lock()
+            .take(max_bytes.saturating_add(1))
+            .read_to_string(&mut buf);
+        // Channel send failure means the receiver already gave up — nothing
+        // left to do.
+        let _ = tx.send(result.map(|_| buf));
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(buf)) => {
+            // If the reader stopped exactly at max_bytes+1, the producer
+            // exceeded our cap.  Refuse rather than silently truncating.
+            if buf.len() as u64 > max_bytes {
+                return None;
+            }
+            Some(buf)
+        }
+        Ok(Err(_)) | Err(_) => None,
+    }
 }
