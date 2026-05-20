@@ -12,8 +12,8 @@ use serde_json::json;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
-use ccbridged::ingest::jsonl::{spawn_watcher, PersistedTokens};
-use ccbridged::state::{spawn as spawn_aggregator, AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT};
+use ccbridged::ingest::jsonl::{PersistedTokens, spawn_watcher};
+use ccbridged::state::{AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator};
 
 // ---------------------------------------------------------------------------
 // Helpers

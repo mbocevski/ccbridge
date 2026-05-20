@@ -23,7 +23,7 @@ pub(crate) fn current_utc_date_string() -> String {
 /// Uses the `time` crate for local-offset awareness.  Falls back to UTC
 /// if the local offset cannot be determined.
 pub(crate) fn secs_until_next_local_midnight() -> std::time::Duration {
-    use time::{macros::time, OffsetDateTime};
+    use time::{OffsetDateTime, macros::time};
 
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
 

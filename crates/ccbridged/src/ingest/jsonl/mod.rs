@@ -45,8 +45,8 @@ mod watcher;
 // Public re-exports — preserve the original `ingest::jsonl::FOO` surface.
 pub use midnight::spawn_midnight_reset;
 pub use offsets::FileOffsets;
-pub use parse::{parse_jsonl_line, ParsedAssistantLine};
-pub use tokens::{tokens_state_path, PersistedTokens};
+pub use parse::{ParsedAssistantLine, parse_jsonl_line};
+pub use tokens::{PersistedTokens, tokens_state_path};
 pub use watcher::spawn_watcher;
 
 // Crate-internal re-export for `permission/additions/audit_log.rs` which
@@ -68,7 +68,7 @@ mod tests {
     use super::midnight::perform_midnight_reset;
     use super::offsets::FileOffsets;
     use super::parse::parse_jsonl_line;
-    use super::tokens::{tokens_state_path, PersistedTokens};
+    use super::tokens::{PersistedTokens, tokens_state_path};
 
     use serde_json::json;
     use tempfile::TempDir;

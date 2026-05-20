@@ -30,7 +30,7 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("setup") => ccbridged::setup::run(),
         Some("undo-last-allow") => {
-            use ccbridged::permission::additions::{audit_log_path, undo_last_allow, UndoOutcome};
+            use ccbridged::permission::additions::{UndoOutcome, audit_log_path, undo_last_allow};
             let alp = audit_log_path().unwrap_or_else(|e| {
                 eprintln!("ccbridged: cannot locate audit log: {e:#}");
                 std::process::exit(1);
@@ -85,7 +85,7 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     use ccbridged::emit::{ctrl as ctrl_emit, http as http_emit, notify as notify_emit};
     use ccbridged::ingest::{hooks as hook_ingest, jsonl as jsonl_ingest};
     use ccbridged::permission::{
-        settings_path, spawn_settings_watcher, Allowlist, ProjectAllowlistCache,
+        Allowlist, ProjectAllowlistCache, settings_path, spawn_settings_watcher,
     };
 
     tracing_subscriber::fmt()

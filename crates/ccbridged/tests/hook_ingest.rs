@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use ccbridged::ingest::hooks as hook_ingest;
-use ccbridged::state::{spawn as spawn_aggregator, AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT};
+use ccbridged::state::{AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator};
 
 // ---------------------------------------------------------------------------
 // Test harness helpers

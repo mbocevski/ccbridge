@@ -18,7 +18,7 @@ use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 
 use ccbridged::emit::ctrl as ctrl_emit;
-use ccbridged::state::{spawn as spawn_aggregator, AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT};
+use ccbridged::state::{AggregatorMsg, DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator};
 
 // ---------------------------------------------------------------------------
 // Test harness helpers

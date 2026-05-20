@@ -24,7 +24,7 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
 // Hook events we register

@@ -46,10 +46,10 @@ mod write;
 // Public re-exports — preserve the original `permission::additions::FOO`
 // surface so external callers (main.rs, state/mod.rs, tests) don't need
 // to change.
-pub use audit_log::{audit_log_path, AdditionMetadata};
-pub use derive::{derive_pattern, DerivedPattern};
-pub use target::{resolve_write_target, AuditTarget, WriteTarget};
-pub use undo::{undo_last_allow, validate_audit_root, UndoOutcome};
+pub use audit_log::{AdditionMetadata, audit_log_path};
+pub use derive::{DerivedPattern, derive_pattern};
+pub use target::{AuditTarget, WriteTarget, resolve_write_target};
+pub use undo::{UndoOutcome, undo_last_allow, validate_audit_root};
 pub use write::write_allow_pattern;
 
 // ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ pub use write::write_allow_pattern;
 mod tests {
     use super::audit_log::{append_audit_entry, find_last_undone_addition};
     use super::derive::derive_pattern;
-    use super::target::{resolve_write_target, AuditTarget, WriteTarget};
+    use super::target::{AuditTarget, WriteTarget, resolve_write_target};
     use super::undo::{lexically_normalize, undo_last_allow, validate_audit_root};
     use super::write::write_allow_pattern;
     use super::{AdditionMetadata, DerivedPattern, UndoOutcome};

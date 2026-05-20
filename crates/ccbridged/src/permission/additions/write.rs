@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use super::audit_log::{append_audit_entry, AdditionMetadata};
+use super::audit_log::{AdditionMetadata, append_audit_entry};
 use super::target::{AuditTarget, WriteTarget};
 use crate::setup::{load_settings, save_settings};
 

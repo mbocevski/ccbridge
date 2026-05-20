@@ -28,10 +28,10 @@ use tokio::net::UnixStream;
 use ccbridged::emit::ctrl as ctrl_emit;
 use ccbridged::ingest::{
     hooks as hook_ingest,
-    jsonl::{spawn_watcher, PersistedTokens},
+    jsonl::{PersistedTokens, spawn_watcher},
 };
 use ccbridged::state::{
-    spawn as spawn_aggregator, AggregatorMsg, AggregatorTx, DEFAULT_APPROVAL_TIMEOUT,
+    AggregatorMsg, AggregatorTx, DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator,
 };
 
 // ---------------------------------------------------------------------------

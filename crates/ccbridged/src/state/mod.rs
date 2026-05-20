@@ -29,7 +29,7 @@ use std::time::Duration;
 use ccbridge_proto::buddy::{Heartbeat, MatchSource, PromptInfo, WireDecision};
 use ccbridge_proto::hook::HookEvent;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
 
 use arc_swap::ArcSwap;
@@ -836,8 +836,8 @@ impl Aggregator {
 
     fn handle_allowlist_always(&mut self, tool_use_id: ToolUseId) {
         use crate::permission::additions::{
-            derive_pattern, resolve_write_target, write_allow_pattern, AdditionMetadata,
-            DerivedPattern,
+            AdditionMetadata, DerivedPattern, derive_pattern, resolve_write_target,
+            write_allow_pattern,
         };
 
         // O(1) lookup — no more session scan.

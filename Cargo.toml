@@ -8,8 +8,8 @@ resolver = "2"
 
 [workspace.package]
 version = "0.1.1"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.85"
 authors = ["Marko Bocevski <marko.bocevski@gmail.com>"]
 license = "MIT"
 

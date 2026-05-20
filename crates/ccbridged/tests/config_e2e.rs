@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ccbridged::ingest::hooks as hook_ingest;
-use ccbridged::state::{spawn as spawn_aggregator, AggregatorMsg};
+use ccbridged::state::{AggregatorMsg, spawn as spawn_aggregator};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;

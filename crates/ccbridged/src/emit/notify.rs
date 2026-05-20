@@ -42,8 +42,8 @@ use anyhow::Result;
 use ccbridge_proto::buddy::{Heartbeat, MatchSource, PromptInfo, WireDecision};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
-use zbus::proxy;
 use zbus::Connection;
+use zbus::proxy;
 // zbus signal streams implement futures_core::Stream; .next() requires StreamExt.
 use futures_lite::StreamExt as _;
 
@@ -577,11 +577,7 @@ async fn handle_turn_done(
         None
     } else {
         let s = shorten_cwd(&evt.cwd);
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+        if s.is_empty() { None } else { Some(s) }
     };
     let session_short = if evt.session_id.is_empty() {
         None
@@ -684,7 +680,7 @@ async fn handle_turn_done(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)] // 8 fields of independent state — a wrapper struct
-                                     // would just rename the same pieces.
+// would just rename the same pieces.
 async fn handle_action(
     proxy: &NotificationsProxy<'_>,
     agg_tx: &AggregatorTx,

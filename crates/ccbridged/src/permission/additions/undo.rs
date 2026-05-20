@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use super::audit_log::{append_audit_entry, find_last_undone_addition, AdditionMetadata};
+use super::audit_log::{AdditionMetadata, append_audit_entry, find_last_undone_addition};
 use super::target::AuditTarget;
 use crate::setup::{load_settings, save_settings};
 

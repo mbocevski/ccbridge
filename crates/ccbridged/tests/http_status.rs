@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use ccbridged::emit::http as http_emit;
-use ccbridged::state::{spawn as spawn_aggregator, DEFAULT_APPROVAL_TIMEOUT};
+use ccbridged::state::{DEFAULT_APPROVAL_TIMEOUT, spawn as spawn_aggregator};
 
 // ---------------------------------------------------------------------------
 // Helpers
