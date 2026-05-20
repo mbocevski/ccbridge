@@ -80,6 +80,10 @@ pub struct WriteTarget {
 /// Serialises as an adjacently-tagged JSON value:
 /// - `{"project_local": {"root": "/path/to/project"}}`
 /// - `"user_global"`
+/// - `"unknown"` — forward-compat sentinel for variants written by a
+///   newer daemon that this binary doesn't understand. Persistent
+///   audit-log state is read by older binaries after a downgrade, so a
+///   missing variant must not hard-fail line parsing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditTarget {
@@ -87,6 +91,11 @@ pub enum AuditTarget {
     ProjectLocal { root: std::path::PathBuf },
     /// `~/.claude/settings.json` — legacy 6-column audit lines only.
     UserGlobal,
+    /// Unknown target written by a newer daemon. Operations that need a
+    /// target (undo) refuse to act on this; the line itself still parses
+    /// cleanly so adjacent entries remain readable.
+    #[serde(other)]
+    Unknown,
 }
 
 impl From<&WriteTarget> for AuditTarget {
@@ -367,6 +376,12 @@ pub fn undo_last_allow(audit_log_path: &Path) -> Result<UndoOutcome> {
             root.join(".claude").join("settings.local.json")
         }
         AuditTarget::UserGlobal => crate::permission::settings_path(),
+        AuditTarget::Unknown => {
+            anyhow::bail!(
+                "audit log entry has an unknown target type — likely written by a \
+                 newer ccbridged version after downgrade. Refusing to undo."
+            );
+        }
     };
 
     let outcome = if !settings_path.exists() {
@@ -594,6 +609,16 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
                 if *count > 0 {
                     // This added is "balanced" by a subsequent undone — skip.
                     *count -= 1;
+                } else if matches!(entry.target, AuditTarget::Unknown) {
+                    // Forward-compat sentinel: a newer daemon wrote a target
+                    // we don't understand. Keep walking back — undoing this
+                    // line would mean operating on a settings file we
+                    // couldn't identify.
+                    tracing::warn!(
+                        pattern = %entry.pattern,
+                        "audit log: skipping addition with unknown target type"
+                    );
+                    continue;
                 } else {
                     // No pending undone for this key — this is the most-recent
                     // un-undone addition.
@@ -1316,6 +1341,44 @@ mod tests {
         assert!(
             allow.is_empty(),
             "pattern must be removed from project-local file"
+        );
+    }
+
+    #[test]
+    fn find_last_undone_addition_skips_unknown_target() {
+        // Newer daemon wrote an addition with a target type this binary
+        // doesn't understand. Older daemon walking back must skip it
+        // rather than try to undo a settings file it can't identify.
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let unknown_line = r#"{"ts":"2026-02-01T00:00:00Z","op":"added","pattern":"Bash(future)","tool_use_id":"toolu_future","session_id":"xyz","target":"future_target"}"#;
+        let known_line = r#"{"ts":"2026-01-01T00:00:00Z","op":"added","pattern":"Bash(known)","tool_use_id":"toolu_known","session_id":"abc","target":"user_global"}"#;
+        // Order on disk: known (older) then unknown (newer); reverse walk
+        // hits unknown first — must skip and reach known.
+        std::fs::write(&audit, format!("{known_line}\n{unknown_line}\n")).unwrap();
+
+        let entry = find_last_undone_addition(&audit)
+            .unwrap()
+            .expect("must skip unknown and return the known addition");
+        assert_eq!(entry.pattern, "Bash(known)");
+        assert!(matches!(entry.target, AuditTarget::UserGlobal));
+    }
+
+    #[test]
+    fn undo_last_allow_bails_on_unknown_target_only() {
+        // If the only addition has an unknown target, undo must bail
+        // cleanly — walk-back skips it, find_last_undone_addition
+        // returns None, undo reports "no additions to undo".
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+        let unknown_line = r#"{"ts":"2026-02-01T00:00:00Z","op":"added","pattern":"Bash(future)","tool_use_id":"toolu_future","session_id":"xyz","target":"future_target"}"#;
+        std::fs::write(&audit, format!("{unknown_line}\n")).unwrap();
+
+        let err = undo_last_allow(&audit).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no allowlist additions"),
+            "must bail with 'no additions' (unknown was skipped), got: {msg}"
         );
     }
 

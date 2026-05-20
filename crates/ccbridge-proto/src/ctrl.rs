@@ -88,6 +88,13 @@ pub enum Topic {
     Turn,
     /// Daemon-internal debug events (off by default).
     Log,
+    /// Forward-compat catch-all. A future client subscribing to a topic
+    /// this server doesn't know about deserialises here rather than
+    /// failing the whole Subscribe command. Consumers ignore Unknown
+    /// silently — `topics.contains(&Topic::Heartbeat)` style checks
+    /// still work, and there's no real subscription effect.
+    #[serde(other)]
+    Unknown,
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +247,26 @@ mod tests {
         let raw_empty: HelloMessage =
             serde_json::from_value(json!({})).expect("must accept empty top-level");
         assert_eq!(raw_empty.hello.version, 0);
+    }
+
+    #[test]
+    fn topic_unknown_variant_for_forward_compat() {
+        // A newer client subscribing to a topic this server doesn't know
+        // about must not break the whole Subscribe command — the unknown
+        // topic deserialises to Topic::Unknown.
+        let raw = json!({"cmd": "subscribe", "topics": ["heartbeat", "future_topic"]});
+        let cmd: Command = serde_json::from_value(raw).expect("must accept unknown topic");
+        match cmd {
+            Command::Subscribe { topics } => {
+                assert_eq!(topics.len(), 2);
+                assert!(topics.contains(&Topic::Heartbeat));
+                assert!(topics.contains(&Topic::Unknown));
+                // Server-side `topics.contains(&Topic::Heartbeat)` checks
+                // still work correctly — Unknown matches no real subscription.
+                assert!(!topics.contains(&Topic::Turn));
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
