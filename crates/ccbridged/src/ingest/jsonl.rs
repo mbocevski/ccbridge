@@ -338,12 +338,20 @@ pub fn spawn_watcher(
 /// Spawn the midnight-reset task.
 ///
 /// Sleeps until next local midnight, then:
-/// 1. Persists reset token state (`today = 0`, `date = new_date`) to `state_path`.
-/// 2. Sends [`crate::state::AggregatorMsg::DailyReset`] to the aggregator.
-/// 3. Sleeps until the following midnight.
+/// 1. Queries the aggregator for the current cumulative token count.
+/// 2. Persists reset token state (`today = 0`, `cumulative = <queried>`,
+///    `date = new_date`) to `state_path`.
+/// 3. Sends [`crate::state::AggregatorMsg::DailyReset`] to the aggregator.
+/// 4. Sleeps until the following midnight.
 ///
 /// Persisting before sending ensures a daemon restart immediately after midnight
 /// doesn't think the day has not yet rolled over.
+///
+/// The cumulative-query in step 1 closes a crash race: the previous version
+/// persisted `cumulative=0` here, so a daemon crash between this write and
+/// the next [`TokensUpdate`] would lose the entire pre-midnight token total
+/// on restart. Querying the aggregator first preserves it across the
+/// rollover.
 pub fn spawn_midnight_reset(
     state_path: PathBuf,
     agg_tx: AggregatorTx,
@@ -353,30 +361,69 @@ pub fn spawn_midnight_reset(
             let sleep_dur = secs_until_next_local_midnight();
             tokio::time::sleep(sleep_dur).await;
 
-            let new_date = current_utc_date_string();
-
-            // Persist the reset (today = 0) immediately.
-            let tokens_snapshot = PersistedTokens {
-                date: new_date.clone(),
-                today: 0,
-                cumulative: 0, // Aggregator owns cumulative; we write 0 here,
-                               // the JSONL watcher will re-persist once it gets
-                               // the next TokensUpdate. Acceptable gap.
-            };
-            if let Err(e) = tokens_snapshot.save(&state_path) {
-                warn!("midnight reset: failed to persist tokens.json: {e:#}");
-            }
-
-            if agg_tx
-                .send(crate::state::AggregatorMsg::DailyReset { date: new_date })
-                .await
-                .is_err()
-            {
-                warn!("midnight reset: aggregator gone, stopping midnight task");
+            if perform_midnight_reset(&state_path, &agg_tx).await.is_break() {
                 break;
             }
         }
     })
+}
+
+/// One iteration of the midnight reset.  Extracted so it can be unit-tested
+/// without waiting for actual local midnight.
+///
+/// Returns `ControlFlow::Break(())` when the aggregator has gone away
+/// (terminal — caller should exit the loop).
+async fn perform_midnight_reset(
+    state_path: &Path,
+    agg_tx: &AggregatorTx,
+) -> std::ops::ControlFlow<()> {
+    let new_date = current_utc_date_string();
+
+    // Read the current cumulative from the aggregator before persisting
+    // so a crash between persist and the next TokensUpdate doesn't lose
+    // history. Falls back to 0 if the query fails.
+    let cumulative = match query_cumulative(agg_tx).await {
+        Some(c) => c,
+        None => {
+            warn!(
+                "midnight reset: failed to query cumulative before \
+                 persist; falling back to 0 (history may not survive a \
+                 crash before the next TokensUpdate)"
+            );
+            0
+        }
+    };
+
+    let tokens_snapshot = PersistedTokens {
+        date: new_date.clone(),
+        today: 0,
+        cumulative,
+    };
+    if let Err(e) = tokens_snapshot.save(state_path) {
+        warn!("midnight reset: failed to persist tokens.json: {e:#}");
+    }
+
+    if agg_tx
+        .send(crate::state::AggregatorMsg::DailyReset { date: new_date })
+        .await
+        .is_err()
+    {
+        warn!("midnight reset: aggregator gone, stopping midnight task");
+        return std::ops::ControlFlow::Break(());
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+/// Round-trip a `GetHeartbeat` through the aggregator to fetch the current
+/// cumulative token count. Returns `None` on send/recv failure.
+async fn query_cumulative(agg_tx: &AggregatorTx) -> Option<u64> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    agg_tx
+        .send(crate::state::AggregatorMsg::GetHeartbeat { respond: tx })
+        .await
+        .ok()?;
+    let hb = rx.await.ok()?;
+    Some(hb.tokens)
 }
 
 // How long to wait between persist flushes when tokens have changed.
@@ -845,6 +892,59 @@ mod tests {
         };
         tokens.save(&path).unwrap();
         assert!(path.exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // perform_midnight_reset
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn midnight_reset_preserves_cumulative_from_aggregator() {
+        // Spin up a real aggregator and seed it with non-zero output tokens
+        // (simulating a normal day's accumulation). Then run one iteration
+        // of perform_midnight_reset and assert the persisted file carries
+        // the actual cumulative — not 0.
+        let dir = TempDir::new().unwrap();
+        let state_path = dir.path().join("tokens.json");
+
+        let (agg_tx, _hb_rx) = crate::state::spawn(
+            crate::state::DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            std::sync::Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+                crate::permission::Allowlist::empty(),
+            ))),
+        );
+
+        // Drive the aggregator's cumulative up to 184_502 via TokensUpdate.
+        agg_tx
+            .send(crate::state::AggregatorMsg::TokensUpdate {
+                output_tokens: 184_502,
+            })
+            .await
+            .unwrap();
+
+        // Round-trip a heartbeat to confirm the aggregator has processed
+        // the update before we run the reset (otherwise we race the read).
+        let (htx, hrx) = tokio::sync::oneshot::channel();
+        agg_tx
+            .send(crate::state::AggregatorMsg::GetHeartbeat { respond: htx })
+            .await
+            .unwrap();
+        let hb = hrx.await.unwrap();
+        assert_eq!(hb.tokens, 184_502, "precondition: aggregator must hold 184_502");
+
+        // Run one reset iteration.
+        let cf = perform_midnight_reset(&state_path, &agg_tx).await;
+        assert!(matches!(cf, std::ops::ControlFlow::Continue(())));
+
+        // The persisted file must carry the queried cumulative, not 0.
+        let loaded = PersistedTokens::load(&state_path).unwrap();
+        assert_eq!(loaded.today, 0, "today must reset to 0");
+        assert_eq!(
+            loaded.cumulative, 184_502,
+            "cumulative must be queried from the aggregator, not zeroed"
+        );
+        assert!(!loaded.date.is_empty(), "date must be set to today");
     }
 
     // -----------------------------------------------------------------------
