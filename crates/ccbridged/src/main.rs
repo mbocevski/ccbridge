@@ -181,6 +181,9 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
 
     if projects_dir.exists() {
+        // Watcher seeds the aggregator with `initial_tokens` from the
+        // top of run_watcher, so we don't need to send SetInitialTokens
+        // ourselves here.
         jsonl_ingest::spawn_watcher(
             projects_dir,
             tokens_path.clone(),
@@ -194,6 +197,23 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
             "~/.claude/projects/ does not exist; JSONL watcher disabled \
              (will be active after first Claude Code session)",
         );
+        // No watcher → no SetInitialTokens path will fire later.  Seed
+        // the aggregator directly so a previously-persisted total still
+        // shows up in heartbeats; otherwise tokens display would silently
+        // regress to zero on machines where Claude Code hasn't run yet
+        // this lifetime.
+        if initial_tokens.cumulative > 0
+            || initial_tokens.today > 0
+            || !initial_tokens.date.is_empty()
+        {
+            let _ = agg_tx
+                .send(ccbridged::state::AggregatorMsg::SetInitialTokens {
+                    cumulative: initial_tokens.cumulative,
+                    today: initial_tokens.today,
+                    date: initial_tokens.date,
+                })
+                .await;
+        }
     }
 
     // Spawn emit tasks (guarded by config flags).

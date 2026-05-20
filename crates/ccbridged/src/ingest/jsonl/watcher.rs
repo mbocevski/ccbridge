@@ -65,6 +65,24 @@ async fn run_watcher(
         initial_tokens.date.clone()
     };
 
+    // Seed the aggregator with the persisted totals so its first
+    // heartbeat carries the full historical counts, not just the
+    // deltas observed since this aggregator booted.  Without this,
+    // a fresh daemon (with `tokens.cumulative=0`) would drift behind
+    // our in-memory counters until the first persist debounce.
+    if (cumulative > 0 || today > 0 || !current_date.is_empty())
+        && agg_tx
+            .send(crate::state::AggregatorMsg::SetInitialTokens {
+                cumulative,
+                today,
+                date: current_date.clone(),
+            })
+            .await
+            .is_err()
+    {
+        warn!("JSONL: aggregator gone before seeding tokens");
+    }
+
     // Snapshot existing file offsets so we only process *new* lines.
     let mut offsets = FileOffsets::new();
     offsets.snapshot_existing(&projects_dir);

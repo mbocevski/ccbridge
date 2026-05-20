@@ -99,6 +99,21 @@ pub enum AggregatorMsg {
     /// Token counts updated by the JSONL tail (task 27993d8d).
     TokensUpdate { output_tokens: u64 },
 
+    /// One-shot at daemon startup: seed the aggregator's `TokenState`
+    /// from the persisted `tokens.json` so heartbeats reflect the full
+    /// historical totals rather than just the deltas observed since
+    /// this aggregator booted.
+    ///
+    /// Sent by the JSONL watcher as the very first thing it does, before
+    /// any [`Self::TokensUpdate`] deltas.  Idempotent: if multiple senders
+    /// race (shouldn't happen — only the watcher sends this), the larger
+    /// value wins so we never regress the displayed total.
+    SetInitialTokens {
+        cumulative: u64,
+        today: u64,
+        date: String,
+    },
+
     /// The daily token counter reset at local midnight.
     ///
     /// `date` is the new date string (`"YYYY-MM-DD"` in UTC) computed by the
@@ -961,6 +976,24 @@ impl Aggregator {
                         Some(AggregatorMsg::TokensUpdate { output_tokens }) => {
                             self.tokens.cumulative += output_tokens;
                             self.tokens.today += output_tokens;
+                            self.broadcast_heartbeat();
+                        }
+                        Some(AggregatorMsg::SetInitialTokens { cumulative, today, date }) => {
+                            // Seed from persisted state.  `max` so a late
+                            // SetInitialTokens (e.g. arriving after a
+                            // TokensUpdate raced ahead) never regresses
+                            // the visible total.
+                            self.tokens.cumulative = self.tokens.cumulative.max(cumulative);
+                            self.tokens.today = self.tokens.today.max(today);
+                            if self.tokens.date.is_empty() {
+                                self.tokens.date = date;
+                            }
+                            debug!(
+                                cumulative = self.tokens.cumulative,
+                                today = self.tokens.today,
+                                date = %self.tokens.date,
+                                "tokens: seeded from persisted state",
+                            );
                             self.broadcast_heartbeat();
                         }
                         Some(AggregatorMsg::DailyReset { date }) => {
@@ -1946,6 +1979,98 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn set_initial_tokens_seeds_aggregator_state() {
+        // The bug: a fresh daemon's aggregator starts with cumulative=0
+        // and today=0, so heartbeats only reflected post-startup deltas.
+        // SetInitialTokens seeds the aggregator from the persisted
+        // tokens.json so heartbeats carry the full historical totals
+        // immediately.
+        let (tx, mut hb_rx) = spawn(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            Arc::new(ArcSwap::new(
+                Arc::new(crate::permission::Allowlist::empty()),
+            )),
+        );
+
+        tx.send(AggregatorMsg::SetInitialTokens {
+            cumulative: 184_502,
+            today: 12_000,
+            date: "2026-05-20".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        // Heartbeat must reflect the seeded values, not zeros.
+        loop {
+            let hb = hb_rx.recv().await.unwrap();
+            if hb.tokens == 184_502 {
+                assert_eq!(hb.tokens_today, 12_000);
+                break;
+            }
+        }
+
+        // A subsequent TokensUpdate adds on top, not replaces.
+        tx.send(AggregatorMsg::TokensUpdate { output_tokens: 200 })
+            .await
+            .unwrap();
+        loop {
+            let hb = hb_rx.recv().await.unwrap();
+            if hb.tokens == 184_702 {
+                assert_eq!(hb.tokens_today, 12_200);
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn set_initial_tokens_does_not_regress_higher_running_total() {
+        // Defensive race-guard: if a TokensUpdate races ahead of
+        // SetInitialTokens (e.g. the watcher's seed message gets
+        // queued behind a TokensUpdate from the same batch), the
+        // visible total must not regress to the persisted value.
+        let (tx, mut hb_rx) = spawn(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            Arc::new(ArcSwap::new(
+                Arc::new(crate::permission::Allowlist::empty()),
+            )),
+        );
+
+        // Simulate a TokensUpdate landing first.
+        tx.send(AggregatorMsg::TokensUpdate {
+            output_tokens: 200_000,
+        })
+        .await
+        .unwrap();
+        loop {
+            let hb = hb_rx.recv().await.unwrap();
+            if hb.tokens == 200_000 {
+                break;
+            }
+        }
+
+        // Now SetInitialTokens with a smaller persisted cumulative.
+        tx.send(AggregatorMsg::SetInitialTokens {
+            cumulative: 50_000,
+            today: 10_000,
+            date: "2026-05-20".to_owned(),
+        })
+        .await
+        .unwrap();
+
+        // Snapshot must keep the higher running total (200_000), not
+        // regress to 50_000.
+        let (htx, hrx) = oneshot::channel();
+        tx.send(AggregatorMsg::GetHeartbeat { respond: htx })
+            .await
+            .unwrap();
+        let hb = hrx.await.unwrap();
+        assert_eq!(hb.tokens, 200_000, "cumulative must not regress");
+        assert_eq!(hb.tokens_today, 200_000, "today must not regress");
     }
 
     #[tokio::test]
