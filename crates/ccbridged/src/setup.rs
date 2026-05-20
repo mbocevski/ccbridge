@@ -20,6 +20,7 @@
 //! * `systemctl` fails (service not installed yet) → warn and continue.
 //! * `$HOME` unset → panic (same constraint as the rest of the daemon).
 
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -236,8 +237,19 @@ pub fn load_settings(path: &Path) -> Result<Value> {
 
 /// Atomically write `settings` to `path` as pretty-printed JSON.
 ///
-/// Writes to `<path>.tmp` first, then renames.  Creates parent directories
-/// if needed.
+/// # Durability guarantee
+///
+/// 1. Data is written to `<path>.json.tmp`.
+/// 2. The tmp file is fsynced (data + metadata) before rename so that no
+///    partially-written content can replace a good settings file.
+/// 3. The parent directory is fsynced after rename so the directory entry
+///    change survives a power loss or `kill -9`.
+///
+/// On ENOSPC or a mid-write crash the tmp file is left behind but the
+/// original `path` is never touched until `rename` succeeds — the worst
+/// outcome is a stale `.json.tmp` that the user can delete.
+///
+/// Creates parent directories if needed.
 pub fn save_settings(path: &Path, settings: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -245,9 +257,34 @@ pub fn save_settings(path: &Path, settings: &Value) -> Result<()> {
     }
     let tmp = path.with_extension("json.tmp");
     let text = serde_json::to_string_pretty(settings)?;
-    std::fs::write(&tmp, &text).with_context(|| format!("write {}", tmp.display()))?;
+    let bytes = text.as_bytes();
+
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .with_context(|| format!("open {} for write", tmp.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        // fsync data + metadata before rename so no partial write can replace
+        // the good settings file.
+        file.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
+    } // file closed here
+
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+
+    // fsync the parent directory so the rename (directory entry change)
+    // survives a power loss.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
     Ok(())
 }
 
