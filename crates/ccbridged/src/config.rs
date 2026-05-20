@@ -146,6 +146,10 @@ pub struct NotifyConfig {
 
     #[serde(default)]
     pub urgency: NotifyUrgency,
+
+    /// `[emit.notify.turn_done]` — "Claude is done" idle-gated notification.
+    #[serde(default)]
+    pub turn_done: TurnDoneConfig,
 }
 
 impl Default for NotifyConfig {
@@ -153,6 +157,7 @@ impl Default for NotifyConfig {
         Self {
             enabled: true,
             urgency: NotifyUrgency::default(),
+            turn_done: TurnDoneConfig::default(),
         }
     }
 }
@@ -165,6 +170,58 @@ pub enum NotifyUrgency {
     Normal,
     #[default]
     Critical,
+}
+
+/// `[emit.notify.turn_done]` — fires a non-actionable "Claude is done"
+/// notification when a session has been idle for `idle_grace_ms` after a
+/// `Stop` event (i.e. the user genuinely walked away rather than typing a
+/// follow-up prompt).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TurnDoneConfig {
+    /// `false` disables the feature entirely (no idle-gate task is spawned
+    /// in the aggregator).  Default: enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// How long after `Stop` the user must remain idle (no `UserPromptSubmit`)
+    /// before the notification fires.  Tune up if you find yourself getting
+    /// notifications immediately after Claude finishes.
+    #[serde(default = "default_turn_done_grace_ms")]
+    pub idle_grace_ms: u64,
+
+    /// How long the notification stays on screen, in milliseconds.
+    /// `0` lets the notification daemon decide; `-1` means persistent.
+    #[serde(default = "default_turn_done_expire_ms")]
+    pub expire_ms: i32,
+}
+
+impl Default for TurnDoneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            idle_grace_ms: default_turn_done_grace_ms(),
+            expire_ms: default_turn_done_expire_ms(),
+        }
+    }
+}
+
+impl TurnDoneConfig {
+    /// Effective idle-grace duration: `idle_grace_ms` when enabled, else zero.
+    pub fn idle_grace(&self) -> std::time::Duration {
+        if self.enabled {
+            std::time::Duration::from_millis(self.idle_grace_ms)
+        } else {
+            std::time::Duration::ZERO
+        }
+    }
+}
+
+fn default_turn_done_grace_ms() -> u64 {
+    10_000
+}
+fn default_turn_done_expire_ms() -> i32 {
+    5_000
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +397,11 @@ fallback   = "deny"
 enabled = false
 urgency = "low"
 
+[emit.notify.turn_done]
+enabled       = false
+idle_grace_ms = 15000
+expire_ms     = 8000
+
 [emit.ctrl]
 enabled        = true
 allow_simulate = true
@@ -363,6 +425,14 @@ state_path = "/tmp/tokens.json"
         // emit.notify
         assert!(!cfg.emit.notify.enabled);
         assert_eq!(cfg.emit.notify.urgency, NotifyUrgency::Low);
+
+        // emit.notify.turn_done
+        assert!(!cfg.emit.notify.turn_done.enabled);
+        assert_eq!(cfg.emit.notify.turn_done.idle_grace_ms, 15_000);
+        assert_eq!(cfg.emit.notify.turn_done.expire_ms, 8_000);
+        // Disabled → idle_grace() returns ZERO so the aggregator skips
+        // spawning idle-gate tasks entirely.
+        assert_eq!(cfg.emit.notify.turn_done.idle_grace(), Duration::ZERO);
 
         // emit.ctrl
         assert!(cfg.emit.ctrl.enabled);
@@ -423,6 +493,14 @@ timeout_ms = 10000
         // Emit defaults.
         assert!(cfg.emit.notify.enabled);
         assert_eq!(cfg.emit.notify.urgency, NotifyUrgency::Critical);
+        // turn_done defaults: enabled, 10s grace, 5s expire.
+        assert!(cfg.emit.notify.turn_done.enabled);
+        assert_eq!(cfg.emit.notify.turn_done.idle_grace_ms, 10_000);
+        assert_eq!(cfg.emit.notify.turn_done.expire_ms, 5_000);
+        assert_eq!(
+            cfg.emit.notify.turn_done.idle_grace(),
+            Duration::from_millis(10_000),
+        );
         assert!(cfg.emit.ctrl.enabled);
         assert!(!cfg.emit.ctrl.allow_simulate);
         assert!(!cfg.emit.http.enabled);

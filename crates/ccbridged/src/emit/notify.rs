@@ -108,9 +108,11 @@ trait Notifications {
 pub fn spawn(
     agg_tx: AggregatorTx,
     hb_rx: broadcast::Receiver<Heartbeat>,
+    turn_done_rx: broadcast::Receiver<crate::state::TurnDoneEvent>,
+    turn_done_expire_ms: i32,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = run(agg_tx, hb_rx).await {
+        if let Err(e) = run(agg_tx, hb_rx, turn_done_rx, turn_done_expire_ms).await {
             warn!("notify: emitter exited with error: {e:#}");
         }
     })
@@ -120,7 +122,12 @@ pub fn spawn(
 // Internal run loop
 // ---------------------------------------------------------------------------
 
-async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) -> Result<()> {
+async fn run(
+    agg_tx: AggregatorTx,
+    mut hb_rx: broadcast::Receiver<Heartbeat>,
+    mut turn_done_rx: broadcast::Receiver<crate::state::TurnDoneEvent>,
+    turn_done_expire_ms: i32,
+) -> Result<()> {
     // Connect to the session bus.  If swaync / a notifications daemon is not
     // running, or the bus itself is absent (headless CI), this returns an
     // error and we bail out before any loop begins.
@@ -205,6 +212,11 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
     // last issued ID so new prompts replace rather than stack.
     let mut last_notif_id: u32 = 0;
 
+    // Per-session "Claude is done" notification IDs.  Used as the
+    // `replaces_id` for the next turn-done notif so consecutive turns in
+    // the same session collapse to one notification rather than stacking.
+    let mut turn_done_notif_ids: HashMap<String, u32> = HashMap::new();
+
     loop {
         tokio::select! {
             // --- heartbeat branch ---
@@ -224,6 +236,25 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         debug!("notify: broadcast channel closed — exiting");
+                        break;
+                    }
+                }
+            }
+
+            // --- turn-done branch ---
+            recv = turn_done_rx.recv() => {
+                match recv {
+                    Ok(evt) => handle_turn_done(
+                        &proxy,
+                        evt,
+                        &mut turn_done_notif_ids,
+                        turn_done_expire_ms,
+                    ).await,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("notify: turn-done broadcast lagged by {n} — skipping ahead");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!("notify: turn-done broadcast closed — exiting");
                         break;
                     }
                 }
@@ -427,6 +458,77 @@ async fn handle_heartbeat(
                 dismissed.clear();
                 *last_prompt_id = None;
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Turn-done handler
+// ---------------------------------------------------------------------------
+
+/// Post the "Claude is done" notification for one session.
+///
+/// Replaces the previous turn-done notification for that session (so two
+/// consecutive idle turns don't stack two visible notifs), normal urgency,
+/// no actions, auto-expires per `expire_ms`.
+async fn handle_turn_done(
+    proxy: &NotificationsProxy<'_>,
+    evt: crate::state::TurnDoneEvent,
+    turn_done_notif_ids: &mut HashMap<String, u32>,
+    expire_ms: i32,
+) {
+    let cwd_basename = std::path::Path::new(&evt.cwd)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&evt.cwd);
+
+    let summary = "Claude is done";
+    let body = if evt.response_snippet.is_empty() {
+        format!("{}  ·  {} tokens", cwd_basename, evt.tokens_cumulative)
+    } else {
+        format!(
+            "{}\n{}  ·  {} tokens",
+            evt.response_snippet, cwd_basename, evt.tokens_cumulative,
+        )
+    };
+
+    let mut hints = HashMap::new();
+    hints.insert(
+        "urgency",
+        zbus::zvariant::Value::U8(1), // 1 = normal
+    );
+
+    let replaces_id = turn_done_notif_ids
+        .get(&evt.session_id)
+        .copied()
+        .unwrap_or(0);
+
+    match proxy
+        .notify(
+            "ccbridge",
+            replaces_id,
+            "",
+            summary,
+            &body,
+            &[], // no actions
+            &hints,
+            expire_ms,
+        )
+        .await
+    {
+        Ok(id) => {
+            debug!(
+                session_id = %evt.session_id,
+                notif_id = id,
+                "notify: posted turn-done notification",
+            );
+            turn_done_notif_ids.insert(evt.session_id, id);
+        }
+        Err(e) => {
+            warn!(
+                session_id = %evt.session_id,
+                "notify: turn-done Notify failed: {e}",
+            );
         }
     }
 }

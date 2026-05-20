@@ -130,6 +130,36 @@ pub enum AggregatorMsg {
     /// case), the call is denied with a helpful reason rather than risking
     /// a too-broad pattern being silently written.
     AllowlistAlways { tool_use_id: ToolUseId },
+
+    /// Idle-gate timer for a `Stop` event has elapsed.  Sent by a task
+    /// spawned from the `Stop` handler after `idle_grace_ms`.
+    ///
+    /// The aggregator checks `prompt_serial` against the session's current
+    /// `last_user_prompt_serial`: if they still match, the user genuinely
+    /// walked away (no new prompt arrived during the grace window) and the
+    /// `TurnDoneEvent` is broadcast.  If a `UserPromptSubmit` happened in
+    /// the meantime, the serials diverge and we skip — the user is still
+    /// at the keyboard.
+    CheckTurnDone {
+        session_id: SessionId,
+        prompt_serial: u64,
+        snapshot: TurnDoneSnapshot,
+    },
+}
+
+/// Frozen-at-Stop data that travels with `CheckTurnDone` and is the payload
+/// of the eventual broadcast `TurnDoneEvent`. Captured at Stop time because
+/// `tokens.cumulative` and the session's `cwd`/`response` could change in
+/// the grace window.
+#[derive(Debug, Clone)]
+pub struct TurnDoneSnapshot {
+    /// Last assistant response, truncated to ~80 chars.  May be empty when
+    /// Claude Code emits a Stop with no assistant turn (e.g. timeout stop).
+    pub response_snippet: String,
+    /// Working directory of the session (basename presented in the notif).
+    pub cwd: String,
+    /// Cumulative token count at Stop time.
+    pub tokens_cumulative: u64,
 }
 
 /// Outcome of an `AggregatorMsg::PermissionDecision`, returned through
@@ -232,6 +262,13 @@ pub struct Session {
     ///
     /// Used as the lookup key into `Aggregator.pending` for heartbeat display.
     pub pending_tool_use_id: Option<ToolUseId>,
+    /// Monotonic counter, bumped on every `UserPromptSubmit` for this session.
+    ///
+    /// Used by the turn-done idle gate: when a `Stop` fires, we capture the
+    /// current value, sleep `idle_grace_ms`, then re-check.  If the counter
+    /// has advanced, the user submitted a new prompt mid-grace and we skip
+    /// the "Claude is done" notification.
+    pub last_user_prompt_serial: u64,
 }
 
 impl Session {
@@ -242,6 +279,7 @@ impl Session {
             running: false,
             waiting: false,
             pending_tool_use_id: None,
+            last_user_prompt_serial: 0,
         }
     }
 
@@ -250,6 +288,24 @@ impl Session {
         self.waiting = false;
         self.pending_tool_use_id = None;
     }
+}
+
+// ---------------------------------------------------------------------------
+// TurnDoneEvent
+// ---------------------------------------------------------------------------
+
+/// Broadcast when a session has been idle for the configured grace period
+/// after a `Stop` event — i.e. Claude finished its turn and the user
+/// hasn't followed up.
+///
+/// Subscribed to by [`crate::emit::notify`] to post a non-actionable info
+/// notification.  Multiple sessions can fire independently.
+#[derive(Debug, Clone)]
+pub struct TurnDoneEvent {
+    pub session_id: SessionId,
+    pub response_snippet: String,
+    pub cwd: String,
+    pub tokens_cumulative: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +372,20 @@ pub struct Aggregator {
     /// Path to the allowlist audit log.
     /// Used by `AllowlistAlways` to append an audit entry.
     audit_log_path: std::path::PathBuf,
+
+    /// Broadcast channel for "Claude finished" notifications.
+    /// Subscribers (notify emitter) receive an event when a session has been
+    /// idle for `turn_done_idle_grace` after a `Stop`.
+    turn_done_tx: broadcast::Sender<TurnDoneEvent>,
+
+    /// How long after `Stop` we wait before firing `TurnDoneEvent`.
+    /// `Duration::ZERO` disables the feature (no idle-gate task spawned).
+    turn_done_idle_grace: Duration,
+
+    /// Sender clone for spawning idle-gate tasks back to ourselves.
+    /// Held inside the aggregator so the spawn site doesn't need to
+    /// thread `tx` through `handle_hook_event`'s callers.
+    self_tx: Option<AggregatorTx>,
 }
 
 /// Maximum number of transcript entries kept for the heartbeat `entries` field.
@@ -333,14 +403,19 @@ pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_millis(30_000);
 
 impl Aggregator {
     /// Create a new [`Aggregator`] and return it together with the broadcast
-    /// receiver that emit modules should subscribe to.
+    /// receivers that emit modules should subscribe to.
     pub fn new(
         approval_timeout: Duration,
         fallback: Fallback,
         allowlist_cache: Arc<ProjectAllowlistCache>,
         audit_log_path: std::path::PathBuf,
-    ) -> (Self, broadcast::Receiver<Heartbeat>) {
+    ) -> (
+        Self,
+        broadcast::Receiver<Heartbeat>,
+        broadcast::Receiver<TurnDoneEvent>,
+    ) {
         let (hb_tx, hb_rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let (turn_done_tx, turn_done_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let agg = Self {
             sessions: HashMap::new(),
             pending: HashMap::new(),
@@ -351,8 +426,29 @@ impl Aggregator {
             fallback,
             allowlist_cache,
             audit_log_path,
+            turn_done_tx,
+            turn_done_idle_grace: Duration::ZERO, // disabled until set
+            self_tx: None,
         };
-        (agg, hb_rx)
+        (agg, hb_rx, turn_done_rx)
+    }
+
+    /// Configure the turn-done idle-gate window.  `Duration::ZERO` disables
+    /// the feature entirely (no idle-gate tasks spawned, no broadcasts).
+    ///
+    /// Must be set before [`Self::run`] is called; the spawn helpers below
+    /// wire this from `[emit.notify.turn_done] idle_grace_ms`.
+    pub fn set_turn_done_idle_grace(&mut self, idle_grace: Duration) {
+        self.turn_done_idle_grace = idle_grace;
+    }
+
+    /// Plumb a self-clone of the aggregator's mpsc sender so the Stop
+    /// handler can spawn idle-gate tasks that send `CheckTurnDone` back.
+    ///
+    /// Set by the spawn helpers in this module; tests that build the
+    /// `Aggregator` by hand can leave it `None` (idle gate is a no-op).
+    fn set_self_tx(&mut self, tx: AggregatorTx) {
+        self.self_tx = Some(tx);
     }
 
     // -----------------------------------------------------------------------
@@ -540,6 +636,7 @@ impl Aggregator {
                     s.clear_pending();
                 }
                 self.broadcast_heartbeat();
+                self.spawn_turn_done_gate(&e);
                 let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
 
@@ -561,6 +658,11 @@ impl Aggregator {
                     .entry(e.base.session_id.clone())
                     .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd));
                 session.running = true;
+                // Bump the serial so any pending CheckTurnDone tasks for
+                // this session see the user is still active and skip the
+                // notification.
+                session.last_user_prompt_serial =
+                    session.last_user_prompt_serial.saturating_add(1);
                 self.broadcast_heartbeat();
                 let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
@@ -727,6 +829,79 @@ impl Aggregator {
         }
     }
 
+    /// Spawn an idle-gate timer for a `Stop` event.  After
+    /// `turn_done_idle_grace`, the spawned task sends `CheckTurnDone` back
+    /// to the aggregator with a snapshot of session state at Stop time.
+    ///
+    /// No-op when:
+    /// - `turn_done_idle_grace` is `Duration::ZERO` (feature disabled), or
+    /// - `self_tx` is `None` (test fixture without a real spawn loop).
+    fn spawn_turn_done_gate(&self, e: &ccbridge_proto::hook::StopEvent) {
+        if self.turn_done_idle_grace.is_zero() {
+            return;
+        }
+        let Some(tx) = self.self_tx.clone() else {
+            return;
+        };
+        let session_id = e.base.session_id.clone();
+        let prompt_serial = self
+            .sessions
+            .get(&session_id)
+            .map(|s| s.last_user_prompt_serial)
+            .unwrap_or(0);
+        let snapshot = TurnDoneSnapshot {
+            response_snippet: e
+                .response
+                .as_deref()
+                .map(truncate_snippet)
+                .unwrap_or_default(),
+            cwd: e.base.cwd.clone(),
+            tokens_cumulative: self.tokens.cumulative,
+        };
+        let grace = self.turn_done_idle_grace;
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            // Best-effort: if the aggregator has shut down between Stop and
+            // grace expiry, the send fails — the broadcast is gone anyway.
+            let _ = tx
+                .send(AggregatorMsg::CheckTurnDone {
+                    session_id,
+                    prompt_serial,
+                    snapshot,
+                })
+                .await;
+        });
+    }
+
+    /// Idle-gate handler.  Fires `TurnDoneEvent` if the session's
+    /// `last_user_prompt_serial` hasn't advanced since the Stop captured it.
+    fn handle_check_turn_done(
+        &self,
+        session_id: SessionId,
+        prompt_serial: u64,
+        snapshot: TurnDoneSnapshot,
+    ) {
+        let current = self
+            .sessions
+            .get(&session_id)
+            .map(|s| s.last_user_prompt_serial)
+            .unwrap_or(prompt_serial); // session gone → treat as still idle
+        if current != prompt_serial {
+            debug!(
+                %session_id,
+                "turn-done: user submitted a new prompt during idle grace — skipping notification",
+            );
+            return;
+        }
+        // Best-effort broadcast; no subscribers is fine.
+        let _ = self.turn_done_tx.send(TurnDoneEvent {
+            session_id,
+            response_snippet: snapshot.response_snippet,
+            cwd: snapshot.cwd,
+            tokens_cumulative: snapshot.tokens_cumulative,
+        });
+    }
+
     fn push_entry(&mut self, entry: String) {
         if self.entries.len() >= ENTRIES_CAP {
             self.entries.pop_back();
@@ -797,6 +972,9 @@ impl Aggregator {
                         Some(AggregatorMsg::AllowlistAlways { tool_use_id }) => {
                             self.handle_allowlist_always(tool_use_id);
                         }
+                        Some(AggregatorMsg::CheckTurnDone { session_id, prompt_serial, snapshot }) => {
+                            self.handle_check_turn_done(session_id, prompt_serial, snapshot);
+                        }
                     }
                 }
                 _ = tick.tick() => {
@@ -817,11 +995,19 @@ pub fn spawn_with_paths(
     fallback: Fallback,
     allowlist_cache: Arc<ProjectAllowlistCache>,
     audit_log_path: std::path::PathBuf,
-) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
-    let (agg, hb_rx) = Aggregator::new(approval_timeout, fallback, allowlist_cache, audit_log_path);
+    turn_done_idle_grace: Duration,
+) -> (
+    AggregatorTx,
+    broadcast::Receiver<Heartbeat>,
+    broadcast::Receiver<TurnDoneEvent>,
+) {
+    let (mut agg, hb_rx, turn_done_rx) =
+        Aggregator::new(approval_timeout, fallback, allowlist_cache, audit_log_path);
+    agg.set_turn_done_idle_grace(turn_done_idle_grace);
     let (tx, rx) = mpsc::channel(256);
+    agg.set_self_tx(tx.clone());
     tokio::spawn(agg.run(rx));
-    (tx, hb_rx)
+    (tx, hb_rx, turn_done_rx)
 }
 
 /// Spawn the Aggregator with a bare user allowlist (test shim).
@@ -829,18 +1015,36 @@ pub fn spawn_with_paths(
 /// Wraps the user allowlist in a `ProjectAllowlistCache` with a no-op
 /// audit log path.  Integration tests that don't exercise `AllowlistAlways`
 /// or project-local evaluation can pass a plain `Arc<ArcSwap<Allowlist>>` here.
+///
+/// Turn-done idle gate is disabled by default — tests that exercise it use
+/// [`spawn_with_paths`] directly.
 pub fn spawn(
     approval_timeout: Duration,
     fallback: Fallback,
     user_allowlist: Arc<ArcSwap<Allowlist>>,
 ) -> (AggregatorTx, broadcast::Receiver<Heartbeat>) {
     let cache = Arc::new(ProjectAllowlistCache::new(user_allowlist, None));
-    spawn_with_paths(
+    let (tx, hb_rx, _turn_done_rx) = spawn_with_paths(
         approval_timeout,
         fallback,
         cache,
         std::path::PathBuf::from("/dev/null"),
-    )
+        Duration::ZERO,
+    );
+    (tx, hb_rx)
+}
+
+/// Truncate `s` to at most 80 Unicode scalar values, taking the first line
+/// only.  Used for the body of the turn-done notification.
+fn truncate_snippet(s: &str) -> String {
+    let first_line = s.lines().next().unwrap_or("").trim();
+    let mut chars = first_line.chars();
+    let head: String = chars.by_ref().take(80).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 /// Extract a short hint from a tool_input JSON value for the heartbeat entries
@@ -947,7 +1151,7 @@ mod tests {
             Arc::new(crate::permission::Allowlist::empty()),
         ));
         let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user, None));
-        let (agg, _rx) = Aggregator::new(
+        let (agg, _rx, _td_rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
             cache,
@@ -1030,7 +1234,7 @@ mod tests {
             Arc::new(ArcSwap::new(Arc::new(al))),
             None,
         ));
-        let (mut agg, _rx) = Aggregator::new(
+        let (mut agg, _rx, _td_rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
             cache,
@@ -1149,7 +1353,7 @@ mod tests {
             Arc::new(crate::permission::Allowlist::empty()),
         ));
         let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user, None));
-        let (agg, _rx) = Aggregator::new(
+        let (agg, _rx, _td_rx) = Aggregator::new(
             DEFAULT_APPROVAL_TIMEOUT,
             crate::config::Fallback::default(),
             cache,
@@ -1703,5 +1907,129 @@ mod tests {
 
         assert_eq!(hb1.total, 1);
         assert_eq!(hb2.total, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Turn-done idle gate
+    // -----------------------------------------------------------------------
+
+    /// Helper: spawn an aggregator with a short turn-done grace.  Returns
+    /// the tx, heartbeat rx (dropped), and turn-done rx.
+    fn spawn_with_turn_done(
+        idle_grace: Duration,
+    ) -> (
+        AggregatorTx,
+        broadcast::Receiver<Heartbeat>,
+        broadcast::Receiver<TurnDoneEvent>,
+    ) {
+        let user = Arc::new(ArcSwap::new(
+            Arc::new(crate::permission::Allowlist::empty()),
+        ));
+        let cache = Arc::new(crate::permission::ProjectAllowlistCache::new(user, None));
+        spawn_with_paths(
+            DEFAULT_APPROVAL_TIMEOUT,
+            crate::config::Fallback::default(),
+            cache,
+            std::path::PathBuf::from("/dev/null"),
+            idle_grace,
+        )
+    }
+
+    #[tokio::test]
+    async fn turn_done_fires_after_idle_grace_with_no_followup() {
+        // 50 ms grace so the test stays fast.
+        let (tx, _hb_rx, mut td_rx) = spawn_with_turn_done(Duration::from_millis(50));
+
+        // Establish a session, then send Stop. With no UserPromptSubmit
+        // afterwards, the idle gate fires within ~50ms.
+        let (r0, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(session_start_event("sess_td")),
+            respond: r0,
+        })
+        .await
+        .unwrap();
+        let (r1, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(stop_event("sess_td")),
+            respond: r1,
+        })
+        .await
+        .unwrap();
+
+        let evt = tokio::time::timeout(Duration::from_secs(2), td_rx.recv())
+            .await
+            .expect("turn-done must fire within 2s")
+            .expect("broadcast still open");
+        assert_eq!(evt.session_id, "sess_td");
+        assert_eq!(evt.response_snippet, "done");
+    }
+
+    #[tokio::test]
+    async fn turn_done_skipped_if_user_prompt_arrives_in_grace() {
+        // Generous grace so we have time to inject UserPromptSubmit.
+        let (tx, _hb_rx, mut td_rx) = spawn_with_turn_done(Duration::from_millis(200));
+
+        let (r0, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(session_start_event("sess_followup")),
+            respond: r0,
+        })
+        .await
+        .unwrap();
+        let (r1, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(stop_event("sess_followup")),
+            respond: r1,
+        })
+        .await
+        .unwrap();
+
+        // User comes back before grace expires — bumps the serial.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (r2, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(user_prompt_event("sess_followup")),
+            respond: r2,
+        })
+        .await
+        .unwrap();
+
+        // Wait past the grace deadline; no event must arrive.
+        let result =
+            tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "turn-done must NOT fire when user submitted a follow-up; got {:?}",
+            result,
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_done_disabled_when_grace_is_zero() {
+        // idle_grace = ZERO disables the feature: no spawn, no broadcast.
+        let (tx, _hb_rx, mut td_rx) = spawn_with_turn_done(Duration::ZERO);
+
+        let (r0, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(session_start_event("sess_off")),
+            respond: r0,
+        })
+        .await
+        .unwrap();
+        let (r1, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(stop_event("sess_off")),
+            respond: r1,
+        })
+        .await
+        .unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(200), td_rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "turn-done must NOT fire when idle_grace is zero",
+        );
     }
 }

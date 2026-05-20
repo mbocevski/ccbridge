@@ -162,11 +162,12 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
 
     // Build the per-project allowlist cache and spawn the aggregator.
     let allowlist_cache = Arc::new(ProjectAllowlistCache::new(Arc::clone(&allowlist), home_dir));
-    let (agg_tx, hb_rx) = ccbridged::state::spawn_with_paths(
+    let (agg_tx, hb_rx, turn_done_rx) = ccbridged::state::spawn_with_paths(
         config.approvals.timeout(),
         config.approvals.fallback,
         allowlist_cache,
         audit_log,
+        config.emit.notify.turn_done.idle_grace(),
     );
 
     // Spawn hook ingest socket.
@@ -198,7 +199,12 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     // Spawn emit tasks (guarded by config flags).
     // swaync subscribes via resubscribe() so ctrl can consume hb_rx directly.
     if config.emit.notify.enabled {
-        notify_emit::spawn(agg_tx.clone(), hb_rx.resubscribe());
+        notify_emit::spawn(
+            agg_tx.clone(),
+            hb_rx.resubscribe(),
+            turn_done_rx,
+            config.emit.notify.turn_done.expire_ms,
+        );
     }
     if config.emit.ctrl.enabled {
         ctrl_emit::spawn(runtime_dir, agg_tx.clone(), hb_rx, owner, tz_offset);

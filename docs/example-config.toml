@@ -41,6 +41,25 @@ enabled = true
 urgency = "critical"
 
 # ---------------------------------------------------------------------------
+# [emit.notify.turn_done] — "Claude is done" idle-gated notification
+#
+# Posts a non-actionable notification when a session has been idle for
+# `idle_grace_ms` after a Stop event (i.e. you walked away rather than
+# typing a follow-up prompt). One notification per session — consecutive
+# turns in the same session collapse rather than stacking.
+# ---------------------------------------------------------------------------
+
+[emit.notify.turn_done]
+enabled       = true
+# How long after Stop the user must remain idle before the notif fires.
+# Tune up if you find yourself getting notifications immediately after
+# Claude finishes (e.g. you're typing the next prompt within a second).
+idle_grace_ms = 10000
+# How long the notification stays on screen, in milliseconds.
+# 0 = let the notification daemon decide; -1 = persistent.
+expire_ms     = 5000
+
+# ---------------------------------------------------------------------------
 # [emit.ctrl] — bidirectional control socket
 #               ($XDG_RUNTIME_DIR/ccbridge/ctrl.sock)
 # ---------------------------------------------------------------------------
