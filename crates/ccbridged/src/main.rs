@@ -230,7 +230,66 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         tracing::debug!("sd_notify ready failed (not running under systemd?): {e}");
     }
 
+    // Spawn the systemd watchdog pinger if the unit set WatchdogSec.
+    // Ping at half-the-interval (sd_notify(2) recommended cadence) and
+    // bounce the ping through the aggregator so a wedged aggregator
+    // task also fails to extend the deadline — not just a "tokio task
+    // got scheduled" liveness check.
+    spawn_watchdog_pinger(agg_tx.clone());
+
     tokio::signal::ctrl_c().await?;
     info!("ccbridged shutting down");
     Ok(())
+}
+
+/// Spawn a task that pings the systemd watchdog at half-the-WatchdogSec
+/// cadence. No-op when WATCHDOG_USEC is unset (running outside systemd
+/// or with WatchdogSec= unset).
+///
+/// The ping does a `GetHeartbeat` round-trip through `agg_tx` first so
+/// a wedged aggregator task — which is the actual failure mode we care
+/// about — fails to extend the watchdog deadline rather than the loop
+/// silently succeeding because the timer task itself is alive.
+fn spawn_watchdog_pinger(agg_tx: ccbridged::state::AggregatorTx) {
+    let mut usec: u64 = 0;
+    let enabled = sd_notify::watchdog_enabled(false, &mut usec);
+    if !enabled || usec == 0 {
+        tracing::debug!("watchdog: not enabled (no WATCHDOG_USEC) — pinger disabled");
+        return;
+    }
+    let interval = std::time::Duration::from_micros(usec / 2);
+    tracing::info!(
+        watchdog_usec = usec,
+        ping_interval_ms = interval.as_millis() as u64,
+        "watchdog: pinger enabled",
+    );
+
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        // Skip the immediate first tick — Ready was just sent, no point
+        // re-pinging in the same scheduler frame.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            // Round-trip through the aggregator. If the aggregator task
+            // has stalled, the oneshot recv blocks past the watchdog
+            // deadline and systemd kills + restarts us.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if agg_tx
+                .send(ccbridged::state::AggregatorMsg::GetHeartbeat { respond: tx })
+                .await
+                .is_err()
+            {
+                tracing::error!("watchdog: aggregator send failed — aggregator dropped");
+                return; // let systemd notice via missed pings
+            }
+            if rx.await.is_err() {
+                tracing::error!("watchdog: aggregator response failed — task wedged");
+                return;
+            }
+            if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]) {
+                tracing::warn!("watchdog: sd_notify(WATCHDOG=1) failed: {e}");
+            }
+        }
+    });
 }
