@@ -610,6 +610,123 @@ async fn allowlist_always_writes_pattern_and_approves() {
 }
 
 // ---------------------------------------------------------------------------
+// J2: symlinked .claude must be rejected as a project-root marker
+// ---------------------------------------------------------------------------
+
+/// A `.claude` directory that is a symlink (even to a real dir) must NOT
+/// be treated as a project-root marker.  Otherwise an attacker who can
+/// drop a symlink in a parent directory of the user's cwd could redirect
+/// `settings.local.json` writes to an arbitrary location.
+///
+/// Setup:
+///     parent/
+///       .claude -> decoy/.claude   ← symlinked, must be rejected
+///       inner/                     ← cwd; no .claude of its own
+///     decoy/
+///       .claude/                   ← real, but should NOT be picked up
+///
+/// Expected: AllowlistAlways writes to `inner/.claude/settings.local.json`
+/// (cwd-as-root fallback), not to `parent/.claude/...` (the symlink) or
+/// `decoy/.claude/...` (the symlink target).
+#[tokio::test]
+async fn symlinked_dotclaude_is_rejected_in_full_flow() {
+    let setup = setup_full(DEFAULT_APPROVAL_TIMEOUT).await;
+
+    let scratch = tempfile::tempdir().expect("scratch tempdir");
+    let parent = scratch.path().join("parent");
+    let inner = parent.join("inner");
+    let decoy = scratch.path().join("decoy");
+    let decoy_claude = decoy.join(".claude");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::create_dir_all(&decoy_claude).unwrap();
+    // parent/.claude → decoy/.claude (symlink, must be rejected).
+    std::os::unix::fs::symlink(&decoy_claude, parent.join(".claude")).unwrap();
+
+    let cwd = inner.to_str().unwrap().to_owned();
+    let tool_use_id = "toolu_symlink_j2_001";
+
+    // ── Subscribe ctrl for heartbeats ────────────────────────────────────────
+    let (mut ctrl_r, mut ctrl_w) = ctrl_connect(&setup.runtime_dir).await;
+    drain_handshake(&mut ctrl_r).await;
+    write_json(
+        &mut ctrl_w,
+        &json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
+    let _: Ack = read_json(&mut ctrl_r).await;
+
+    // ── Send PreToolUse via hook binary ──────────────────────────────────────
+    let event = serde_json::to_string(&json!({
+        "session_id": "sess_symlink_j2",
+        "transcript_path": "/tmp/sess_symlink_j2.jsonl",
+        "cwd": cwd,
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo j2"},
+        "tool_use_id": tool_use_id
+    }))
+    .unwrap();
+
+    let mut child = Command::new(hook_bin())
+        .env("XDG_RUNTIME_DIR", &setup.runtime_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn ccbridge-hook");
+
+    let stdin = child.stdin.take().unwrap();
+    std::thread::spawn(move || {
+        let mut w = stdin;
+        w.write_all(event.as_bytes()).unwrap();
+        w.write_all(b"\n").unwrap();
+    });
+
+    wait_for_heartbeat(&mut ctrl_r, |hb| {
+        hb.waiting == 1 && hb.prompt.as_ref().is_some_and(|p| p.id == tool_use_id)
+    })
+    .await;
+
+    setup
+        .agg_tx
+        .send(AggregatorMsg::AllowlistAlways {
+            tool_use_id: tool_use_id.to_owned(),
+        })
+        .await
+        .expect("send AllowlistAlways");
+
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(output.status.success(), "hook must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"permissionDecision\":\"allow\""),
+        "AllowlistAlways must approve the in-flight call, got: {stdout}"
+    );
+
+    // ── Assert settings landed at inner/.claude (cwd fallback), NOT
+    // parent/.claude (symlink) or decoy/.claude (symlink target).
+    let inner_local = inner.join(".claude").join("settings.local.json");
+    wait_for_path(&inner_local, Duration::from_secs(2)).await;
+
+    // The decoy must remain pristine — never written through.
+    assert!(
+        !decoy_claude.join("settings.local.json").exists(),
+        "settings.local.json must NOT have been written to the symlink target",
+    );
+    // parent/.claude/settings.local.json would resolve to decoy via the
+    // symlink — also must not exist (covered by the previous assert, but
+    // belt-and-braces).
+    let parent_local_via_symlink = parent.join(".claude").join("settings.local.json");
+    assert!(
+        !parent_local_via_symlink.exists(),
+        "settings.local.json must NOT have been written through the parent symlink",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // K2a: expired id ctrl decision doesn't hang
 // ---------------------------------------------------------------------------
 
