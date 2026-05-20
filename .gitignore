@@ -6,3 +6,7 @@
 *.pkg.tar.xz
 # Claude Code session metadata (worktrees, cache, etc.)
 /.claude/
+
+# Internal working docs kept on disk for reference, not committed.
+/docs/control-protocol.md
+/docs/v2-ble-readiness.md
