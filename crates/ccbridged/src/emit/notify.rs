@@ -276,6 +276,7 @@ async fn run(
                                 &args.action_key,
                                 &mut active,
                                 &mut session_notif,
+                                &mut dismissed,
                                 &mut first_stale_click_seen,
                             ).await;
                         }
@@ -413,8 +414,11 @@ async fn handle_heartbeat(
     for (session_key, prompt) in by_session.iter() {
         // Detect prompt rotation within the same session — drop the old
         // dismissal record so the new prompt isn't suppressed.
-        let prev = last_prompt_ids.insert(session_key.clone(), prompt.id.clone());
-        if let Some(old_id) = prev {
+        let prompt_changed = match last_prompt_ids.get(session_key) {
+            Some(prev) => prev != &prompt.id,
+            None => true, // never seen this session — first post
+        };
+        if let Some(old_id) = last_prompt_ids.get(session_key).cloned() {
             if old_id != prompt.id {
                 dismissed.remove(&old_id);
             }
@@ -422,6 +426,18 @@ async fn handle_heartbeat(
 
         if dismissed.contains(&prompt.id) {
             continue; // user dismissed this exact prompt; don't re-post
+        }
+
+        // Already posted this exact prompt for this session and the user
+        // hasn't dismissed it — heartbeats are broadcast on every state
+        // change (token updates, transcript entries, etc.), so re-posting
+        // the same prompt would needlessly cycle the notif_id and create
+        // a window where the user's click lands on a stale id that
+        // ActionInvoked can't resolve.  `last_prompt_ids` is updated only
+        // after a successful Notify so a transient DBus failure doesn't
+        // leave us thinking we already posted.
+        if !prompt_changed && session_notif.contains_key(session_key) {
+            continue;
         }
 
         // Derive display helpers for session context.
@@ -528,6 +544,7 @@ async fn handle_heartbeat(
                     },
                 );
                 session_notif.insert(session_key.clone(), id);
+                last_prompt_ids.insert(session_key.clone(), prompt.id.clone());
             }
             Err(e) => {
                 warn!("notify: Notify call failed: {e}");
@@ -659,6 +676,8 @@ async fn handle_turn_done(
 // ActionInvoked handler
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)] // 8 fields of independent state — a wrapper struct
+                                       // would just rename the same pieces.
 async fn handle_action(
     proxy: &NotificationsProxy<'_>,
     agg_tx: &AggregatorTx,
@@ -666,6 +685,7 @@ async fn handle_action(
     action_key: &str,
     active: &mut HashMap<u32, ActiveNotif>,
     session_notif: &mut HashMap<String, u32>,
+    dismissed: &mut std::collections::HashSet<String>,
     first_stale_click_seen: &mut bool,
 ) {
     // Stale-click guard: if this notif_id isn't in our map it's from a previous
@@ -726,7 +746,7 @@ async fn handle_action(
         "default" | "once" => {
             let _ = agg_tx
                 .send(AggregatorMsg::PermissionDecision {
-                    tool_use_id,
+                    tool_use_id: tool_use_id.clone(),
                     decision: WireDecision::Once,
                     respond: None,
                 })
@@ -734,13 +754,15 @@ async fn handle_action(
         }
         "always" => {
             let _ = agg_tx
-                .send(AggregatorMsg::AllowlistAlways { tool_use_id })
+                .send(AggregatorMsg::AllowlistAlways {
+                    tool_use_id: tool_use_id.clone(),
+                })
                 .await;
         }
         "deny" => {
             let _ = agg_tx
                 .send(AggregatorMsg::PermissionDecision {
-                    tool_use_id,
+                    tool_use_id: tool_use_id.clone(),
                     decision: WireDecision::Deny,
                     respond: None,
                 })
@@ -769,6 +791,14 @@ async fn handle_action(
     if session_notif.get(&session_id).copied() == Some(notif_id) {
         session_notif.remove(&session_id);
     }
+
+    // Record the actioned tool_use_id so any heartbeat that still carries
+    // this prompt — possible during the race window between our send to
+    // the aggregator and the aggregator clearing `pending` — does not
+    // re-post the notification we just acted on.  The dismissal cleanup
+    // in handle_heartbeat will drop this entry once the prompt is no
+    // longer in any heartbeat.
+    dismissed.insert(tool_use_id);
 }
 
 // ---------------------------------------------------------------------------
