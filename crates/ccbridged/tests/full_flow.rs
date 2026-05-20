@@ -301,7 +301,7 @@ async fn golden_path() {
 
     // ── 4. Wait for waiting=1 and send permission ────────────────────────────
     let hb = wait_for_heartbeat(&mut ctrl_r, |hb| {
-        hb.waiting == 1 && hb.prompt.as_ref().is_some_and(|p| p.id == tool_use_id)
+        hb.waiting == 1 && hb.prompts.iter().any(|p| p.id == tool_use_id)
     })
     .await;
     assert_eq!(hb.waiting, 1);
@@ -569,7 +569,7 @@ async fn allowlist_always_writes_pattern_and_approves() {
 
     // ── Wait for waiting=1 ───────────────────────────────────────────────────
     wait_for_heartbeat(&mut ctrl_r, |hb| {
-        hb.waiting == 1 && hb.prompt.as_ref().is_some_and(|p| p.id == tool_use_id)
+        hb.waiting == 1 && hb.prompts.iter().any(|p| p.id == tool_use_id)
     })
     .await;
 
@@ -688,7 +688,7 @@ async fn symlinked_dotclaude_is_rejected_in_full_flow() {
     });
 
     wait_for_heartbeat(&mut ctrl_r, |hb| {
-        hb.waiting == 1 && hb.prompt.as_ref().is_some_and(|p| p.id == tool_use_id)
+        hb.waiting == 1 && hb.prompts.iter().any(|p| p.id == tool_use_id)
     })
     .await;
 
@@ -728,6 +728,74 @@ async fn symlinked_dotclaude_is_rejected_in_full_flow() {
         !parent_local_via_symlink.exists(),
         "settings.local.json must NOT have been written through the parent symlink",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-session prompts in a single heartbeat
+// ---------------------------------------------------------------------------
+
+/// Two parallel sessions both have a pending PreToolUse → the heartbeat
+/// surface both prompts so the notify emitter can post a notification per
+/// session rather than collapsing to one.
+#[tokio::test]
+async fn heartbeat_lists_prompts_for_parallel_sessions() {
+    use ccbridge_proto::hook::{HookBase, HookEvent, PermissionMode, PreToolUseEvent};
+
+    let setup = setup_full(DEFAULT_APPROVAL_TIMEOUT).await;
+    let (mut ctrl_r, mut ctrl_w) = ctrl_connect(&setup.runtime_dir).await;
+    drain_handshake(&mut ctrl_r).await;
+    write_json(
+        &mut ctrl_w,
+        &json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
+    let _: Ack = read_json(&mut ctrl_r).await;
+
+    // Inject two parallel PreToolUse events through the aggregator.  We
+    // don't drive the hook subprocess here because that would deadlock
+    // waiting for an approval per call — direct injection is enough to
+    // exercise the heartbeat shape we care about.
+    for (sid, tid, tool) in [
+        ("sess-parallel-A", "toolu_pa", "Bash"),
+        ("sess-parallel-B", "toolu_pb", "Edit"),
+    ] {
+        let (resp, _) = tokio::sync::oneshot::channel();
+        let event = HookEvent::PreToolUse(PreToolUseEvent {
+            base: HookBase {
+                session_id: sid.to_owned(),
+                transcript_path: format!("/tmp/{sid}.jsonl"),
+                cwd: format!("/tmp/{sid}"),
+            },
+            permission_mode: PermissionMode::Default,
+            effort: None,
+            tool_name: tool.to_owned(),
+            tool_input: json!({"command": "echo hi"}),
+            tool_use_id: tid.to_owned(),
+            agent_id: None,
+            agent_type: None,
+        });
+        setup
+            .agg_tx
+            .send(AggregatorMsg::HookEvent {
+                event: Box::new(event),
+                respond: resp,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Wait for a heartbeat that reflects both pending prompts.
+    let hb = wait_for_heartbeat(&mut ctrl_r, |hb| hb.waiting == 2 && hb.prompts.len() == 2).await;
+    let by_session: std::collections::HashMap<String, &ccbridge_proto::buddy::PromptInfo> = hb
+        .prompts
+        .iter()
+        .map(|p| (p.session_id.clone().unwrap(), p))
+        .collect();
+    assert_eq!(by_session["sess-parallel-A"].id, "toolu_pa");
+    assert_eq!(by_session["sess-parallel-A"].tool, "Bash");
+    assert_eq!(by_session["sess-parallel-B"].id, "toolu_pb");
+    assert_eq!(by_session["sess-parallel-B"].tool, "Edit");
+    assert_eq!(hb.msg, "approve: 2 pending");
 }
 
 // ---------------------------------------------------------------------------

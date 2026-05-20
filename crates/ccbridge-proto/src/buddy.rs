@@ -35,13 +35,23 @@ use serde_json::Value;
 /// Wire shape:
 /// ```json
 /// {
-///   "total": 3, "running": 1, "waiting": 1,
-///   "msg": "approve: Bash",
+///   "total": 3, "running": 1, "waiting": 2,
+///   "msg": "approve: 2 pending",
 ///   "entries": ["10:42 git push", "10:41 yarn test"],
 ///   "tokens": 184502, "tokens_today": 31200,
-///   "prompt": {"id": "req_abc123", "tool": "Bash", "hint": "rm -rf /tmp/foo"}
+///   "prompts": [
+///     {"id": "req_abc", "tool": "Bash", "hint": "rm -rf /tmp/foo",
+///      "session_id": "sess-A"},
+///     {"id": "req_def", "tool": "Edit", "hint": "/etc/hosts",
+///      "session_id": "sess-B"}
+///   ]
 /// }
 /// ```
+///
+/// `prompts` is a list (one element per session currently waiting on an
+/// approval) so emitters can surface each parallel session as its own
+/// notification.  Insertion order matches the aggregator's session HashMap
+/// — order is not guaranteed and clients should key by `prompt.session_id`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Heartbeat {
     /// Total number of open sessions.
@@ -65,9 +75,10 @@ pub struct Heartbeat {
     /// Output tokens since local midnight (persisted across restarts).
     #[serde(default)]
     pub tokens_today: u64,
-    /// Present only when a permission decision is pending.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<PromptInfo>,
+    /// All currently pending permission prompts, one per waiting session.
+    /// Empty when no session is awaiting a decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<PromptInfo>,
 }
 
 /// Pending permission prompt embedded in [`Heartbeat`].
@@ -405,7 +416,7 @@ mod tests {
         assert!(hb.entries.is_empty());
         assert_eq!(hb.tokens, 0);
         assert_eq!(hb.tokens_today, 0);
-        assert!(hb.prompt.is_none());
+        assert!(hb.prompts.is_empty());
     }
 
     #[test]
@@ -418,33 +429,57 @@ mod tests {
         });
         let hb: Heartbeat = serde_json::from_value(raw).unwrap();
         assert_eq!(hb.total, 2);
-        assert!(hb.prompt.is_none());
+        assert!(hb.prompts.is_empty());
         // tokens_today field name preserved on round-trip
         let v = serde_json::to_value(&hb).unwrap();
         assert_eq!(v["tokens_today"], 12000);
+        // empty prompts list omitted from the wire (skip_serializing_if).
+        assert!(v.get("prompts").is_none());
     }
 
     #[test]
-    fn heartbeat_with_prompt() {
+    fn heartbeat_with_one_prompt() {
         let raw = json!({
             "total": 1, "running": 0, "waiting": 1,
             "msg": "approve: Bash",
             "entries": ["10:42 Bash: rm -rf /tmp/foo"],
             "tokens": 184502, "tokens_today": 31200,
-            "prompt": {
+            "prompts": [{
                 "id": "req_abc123",
                 "tool": "Bash",
                 "hint": "rm -rf /tmp/foo"
-            }
+            }]
         });
         let hb: Heartbeat = serde_json::from_value(raw).unwrap();
-        let p = hb.prompt.unwrap();
+        assert_eq!(hb.prompts.len(), 1);
+        let p = &hb.prompts[0];
         assert_eq!(p.id, "req_abc123");
         assert_eq!(p.tool, "Bash");
         assert_eq!(p.hint, "rm -rf /tmp/foo");
-        // Annotation fields absent → both None.
         assert!(p.matched_pattern.is_none());
         assert!(p.matched_source.is_none());
+    }
+
+    #[test]
+    fn heartbeat_with_multiple_prompts() {
+        // Two parallel sessions both waiting for approval — both surface in
+        // a single heartbeat.
+        let raw = json!({
+            "total": 2, "running": 0, "waiting": 2,
+            "msg": "approve: 2 pending",
+            "entries": [],
+            "tokens": 0, "tokens_today": 0,
+            "prompts": [
+                {"id": "req_a", "tool": "Bash", "hint": "git status",
+                 "session_id": "sess-a"},
+                {"id": "req_b", "tool": "Edit", "hint": "/etc/hosts",
+                 "session_id": "sess-b"}
+            ]
+        });
+        let hb: Heartbeat = serde_json::from_value(raw).unwrap();
+        assert_eq!(hb.prompts.len(), 2);
+        assert_eq!(hb.prompts[0].session_id.as_deref(), Some("sess-a"));
+        assert_eq!(hb.prompts[1].session_id.as_deref(), Some("sess-b"));
     }
 
     #[test]

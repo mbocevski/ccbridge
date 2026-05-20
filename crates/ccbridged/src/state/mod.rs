@@ -463,39 +463,35 @@ impl Aggregator {
         let running = self.sessions.values().filter(|s| s.running).count() as u32;
         let waiting = self.sessions.values().filter(|s| s.waiting).count() as u32;
 
-        // Build `prompt` from the first waiting session (at most one in practice).
-        // Look up the PendingApproval by `pending_tool_use_id` — single source of truth.
-        let prompt = self.sessions.values().find(|s| s.waiting).and_then(|s| {
-            let id = s.pending_tool_use_id.as_ref()?;
-            let (_, approval) = self.pending.get(id)?;
-            Some(PromptInfo {
-                id: id.clone(),
-                tool: approval.tool_name.clone(),
-                hint: approval.tool_hint.clone(),
-                matched_pattern: approval.matched_pattern.clone(),
-                matched_source: approval.match_source.map(MatchSource::from),
-                session_id: Some(s.id.clone()),
-                cwd: Some(s.cwd.clone()),
-                agent_type: approval.event.agent_type.clone(),
+        // Build one `PromptInfo` per waiting session, in session-iteration
+        // order.  Session HashMap order is unspecified; clients must key by
+        // `session_id` rather than rely on positional stability.
+        let prompts: Vec<PromptInfo> = self
+            .sessions
+            .values()
+            .filter(|s| s.waiting)
+            .filter_map(|s| {
+                let id = s.pending_tool_use_id.as_ref()?;
+                let (_, approval) = self.pending.get(id)?;
+                Some(PromptInfo {
+                    id: id.clone(),
+                    tool: approval.tool_name.clone(),
+                    hint: approval.tool_hint.clone(),
+                    matched_pattern: approval.matched_pattern.clone(),
+                    matched_source: approval.match_source.map(MatchSource::from),
+                    session_id: Some(s.id.clone()),
+                    cwd: Some(s.cwd.clone()),
+                    agent_type: approval.event.agent_type.clone(),
+                })
             })
-        });
+            .collect();
 
-        let msg = if waiting > 0 {
-            let tool = self
-                .sessions
-                .values()
-                .find(|s| s.waiting)
-                .and_then(|s| s.pending_tool_use_id.as_ref())
-                .and_then(|id| self.pending.get(id))
-                .map(|(_, pa)| pa.tool_name.as_str())
-                .unwrap_or("tool");
-            format!("approve: {}", tool)
-        } else if running > 0 {
-            format!("running ({})", running)
-        } else if total > 0 {
-            format!("idle ({})", total)
-        } else {
-            "no sessions".to_owned()
+        let msg = match prompts.len() {
+            0 if running > 0 => format!("running ({})", running),
+            0 if total > 0 => format!("idle ({})", total),
+            0 => "no sessions".to_owned(),
+            1 => format!("approve: {}", prompts[0].tool),
+            n => format!("approve: {n} pending"),
         };
 
         let entries: Vec<String> = self.entries.iter().cloned().collect();
@@ -522,7 +518,7 @@ impl Aggregator {
             entries,
             tokens: self.tokens.cumulative,
             tokens_today: self.tokens.today,
-            prompt,
+            prompts,
         }
     }
 
@@ -1167,7 +1163,7 @@ mod tests {
         assert_eq!(hb.total, 0);
         assert_eq!(hb.running, 0);
         assert_eq!(hb.waiting, 0);
-        assert!(hb.prompt.is_none());
+        assert!(hb.prompts.is_empty());
         assert_eq!(hb.msg, "no sessions");
     }
 
@@ -1217,7 +1213,8 @@ mod tests {
         // Heartbeat should reflect waiting=1 with populated prompt.
         let hb = agg.snapshot();
         assert_eq!(hb.waiting, 1);
-        let prompt = hb.prompt.expect("prompt must be set");
+        assert_eq!(hb.prompts.len(), 1, "exactly one prompt expected");
+        let prompt = hb.prompts.into_iter().next().expect("prompt must be set");
         assert_eq!(prompt.id, "toolu_abc");
         assert_eq!(prompt.tool, "Bash");
         assert_eq!(prompt.hint, "echo hello");
@@ -1265,8 +1262,11 @@ mod tests {
         // Snapshot must carry the annotation fields.
         let hb = agg.snapshot();
         assert_eq!(hb.waiting, 1);
+        assert_eq!(hb.prompts.len(), 1);
         let prompt = hb
-            .prompt
+            .prompts
+            .into_iter()
+            .next()
             .expect("prompt must be present for waiting session");
         assert_eq!(
             prompt.matched_pattern.as_deref(),
@@ -1293,7 +1293,8 @@ mod tests {
         );
 
         let hb = agg.snapshot();
-        let prompt = hb.prompt.expect("prompt must be set");
+        assert_eq!(hb.prompts.len(), 1, "exactly one prompt expected");
+        let prompt = hb.prompts.into_iter().next().expect("prompt must be set");
         assert_eq!(
             prompt.session_id.as_deref(),
             Some("sess-cwd"),
@@ -1335,13 +1336,71 @@ mod tests {
         agg.handle_hook_event(event, respond_tx);
 
         let hb = agg.snapshot();
-        let prompt = hb.prompt.expect("prompt must be set");
+        assert_eq!(hb.prompts.len(), 1, "exactly one prompt expected");
+        let prompt = hb.prompts.into_iter().next().expect("prompt must be set");
         assert_eq!(
             prompt.agent_type.as_deref(),
             Some("general-purpose"),
             "agent_type must be captured from the PreToolUse event"
         );
         assert_eq!(prompt.session_id.as_deref(), Some("sess-agent"),);
+    }
+
+    #[test]
+    fn snapshot_lists_all_pending_sessions() {
+        // Two parallel sessions, each waiting on its own PreToolUse → snapshot
+        // surfaces both prompts (no longer collapsed to one).  Order is
+        // unspecified (HashMap iteration), so we key the assertion by
+        // session_id.
+        let mut agg = new_agg();
+
+        for sid in ["sess-A", "sess-B"] {
+            let (tx0, _) = oneshot::channel();
+            agg.handle_hook_event(session_start_event(sid), tx0);
+        }
+
+        for (sid, tid, tool) in [
+            ("sess-A", "toolu_a_01", "Bash"),
+            ("sess-B", "toolu_b_01", "Edit"),
+        ] {
+            let (resp, _) = oneshot::channel();
+            agg.handle_hook_event(pre_tool_use_event(sid, tid, tool), resp);
+        }
+
+        let hb = agg.snapshot();
+        assert_eq!(hb.waiting, 2, "both sessions must be counted as waiting");
+        assert_eq!(hb.prompts.len(), 2, "both prompts must be in the heartbeat");
+        assert_eq!(
+            hb.msg, "approve: 2 pending",
+            "msg must summarise multi-pending state",
+        );
+
+        let by_session: std::collections::HashMap<&str, &PromptInfo> = hb
+            .prompts
+            .iter()
+            .map(|p| (p.session_id.as_deref().unwrap(), p))
+            .collect();
+        assert_eq!(by_session["sess-A"].id, "toolu_a_01");
+        assert_eq!(by_session["sess-A"].tool, "Bash");
+        assert_eq!(by_session["sess-B"].id, "toolu_b_01");
+        assert_eq!(by_session["sess-B"].tool, "Edit");
+    }
+
+    #[test]
+    fn snapshot_msg_for_one_pending_names_the_tool() {
+        // Sanity check that the single-pending case still produces the
+        // friendly "approve: <tool>" form rather than "approve: 1 pending".
+        let mut agg = new_agg();
+        let (t0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess-solo"), t0);
+        let (r, _) = oneshot::channel();
+        agg.handle_hook_event(
+            pre_tool_use_event("sess-solo", "toolu_solo", "Bash"),
+            r,
+        );
+
+        let hb = agg.snapshot();
+        assert_eq!(hb.msg, "approve: Bash");
     }
 
     // -----------------------------------------------------------------------
@@ -1577,7 +1636,7 @@ mod tests {
 
         let hb = agg.snapshot();
         assert_eq!(hb.waiting, 0);
-        assert!(hb.prompt.is_none());
+        assert!(hb.prompts.is_empty());
 
         assert!(agg.pending.is_empty());
     }
@@ -1611,7 +1670,7 @@ mod tests {
         assert!(agg.pending.is_empty(), "pending must be cleared");
         assert_eq!(agg.snapshot().waiting, 0, "waiting must be 0 after timeout");
         assert!(
-            agg.snapshot().prompt.is_none(),
+            agg.snapshot().prompts.is_empty(),
             "prompt must be None after timeout"
         );
     }
@@ -1670,7 +1729,7 @@ mod tests {
         let hb = agg.snapshot();
         assert_eq!(hb.running, 0);
         assert_eq!(hb.waiting, 0);
-        assert!(hb.prompt.is_none());
+        assert!(hb.prompts.is_empty());
     }
 
     #[test]
@@ -1810,7 +1869,7 @@ mod tests {
 
         let hb = hb_rx.recv().await.unwrap();
         assert_eq!(hb.waiting, 1);
-        assert!(hb.prompt.is_some());
+        assert_eq!(hb.prompts.len(), 1);
 
         tx.send(AggregatorMsg::PermissionDecision {
             tool_use_id: "toolu_run1".to_owned(),
@@ -1825,7 +1884,7 @@ mod tests {
 
         let hb2 = hb_rx.recv().await.unwrap();
         assert_eq!(hb2.waiting, 0);
-        assert!(hb2.prompt.is_none());
+        assert!(hb2.prompts.is_empty());
     }
 
     #[tokio::test]

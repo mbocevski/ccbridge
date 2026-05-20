@@ -365,14 +365,14 @@ async fn pre_tool_use_timeout_clears_aggregator_state() {
                 .await
                 .ok()?;
             let hb = rx.await.ok()?;
-            (hb.waiting == 0 && hb.prompt.is_none()).then_some(hb)
+            (hb.waiting == 0 && hb.prompts.is_empty()).then_some(hb)
         }
     })
     .await
     .expect("aggregator must clear pending state within deadline");
     assert_eq!(hb.waiting, 0, "waiting must be 0 after timeout");
     assert!(
-        hb.prompt.is_none(),
+        hb.prompts.is_empty(),
         "prompt must be None after timeout — emitters must not re-pop"
     );
 }

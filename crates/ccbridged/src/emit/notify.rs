@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use ccbridge_proto::buddy::{Heartbeat, MatchSource, WireDecision};
+use ccbridge_proto::buddy::{Heartbeat, MatchSource, PromptInfo, WireDecision};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 use zbus::proxy;
@@ -184,17 +184,30 @@ async fn run(
         }
     }
 
-    // notif_id → tool_use_id for every currently-visible approval notification.
-    // In normal operation at most one entry lives here (one pending prompt),
-    // but a HashMap is future-proof and the close-all path is idempotent.
-    let mut active: HashMap<u32, String> = HashMap::new();
+    // Per-notif metadata for every currently-visible ccbridge notification
+    // (both approval prompts AND turn-done notifications).  Used by
+    // ActionInvoked / NotificationClosed to figure out what the user
+    // actioned, and by close_all on shutdown.
+    let mut active: HashMap<u32, ActiveNotif> = HashMap::new();
 
-    // tool_use_ids the user has dismissed (closed without acting).
-    // When a heartbeat arrives for a prompt id in this set, we do NOT
-    // re-post the notification — the user already said "go away".
-    // The set is cleared when the prompt id changes (new prompt or no prompt).
+    // session_id → currently visible notif_id for that session.  At most one
+    // ccbridge notif per session at any time (an approval and a turn-done
+    // can't coexist for the same session — Stop clears `pending`).  Used as
+    // `replaces_id` so the next post on the same session collapses in-place
+    // rather than stacking a second notification.
+    let mut session_notif: HashMap<String, u32> = HashMap::new();
+
+    // tool_use_ids the user dismissed (closed without acting).  When a
+    // heartbeat arrives for a prompt id in this set, we do NOT re-post the
+    // notification — the user already said "go away".  The corresponding
+    // entry is removed when the session's prompt id rotates, when the
+    // session's pending state clears, or when the session goes away.
     let mut dismissed: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut last_prompt_id: Option<String> = None;
+
+    // session_id → most-recent prompt id we posted a notification for.
+    // Used to detect "same session, new prompt" so we can drop the old
+    // dismissal and let the new prompt through.
+    let mut last_prompt_ids: HashMap<String, String> = HashMap::new();
 
     // First-stale-click feedback: after a daemon restart, an orphaned swaync
     // action click arrives for an id we don't recognise.  Post a one-time
@@ -207,16 +220,6 @@ async fn run(
     // notification daemon.
     let mut first_stale_click_seen = false;
 
-    // The replaces_id we pass on the next Notify call.  Starts at 0 ("no
-    // replacement").  After the first successful notify we keep it as the
-    // last issued ID so new prompts replace rather than stack.
-    let mut last_notif_id: u32 = 0;
-
-    // Per-session "Claude is done" notification IDs.  Used as the
-    // `replaces_id` for the next turn-done notif so consecutive turns in
-    // the same session collapse to one notification rather than stacking.
-    let mut turn_done_notif_ids: HashMap<String, u32> = HashMap::new();
-
     loop {
         tokio::select! {
             // --- heartbeat branch ---
@@ -226,9 +229,9 @@ async fn run(
                         &proxy,
                         hb,
                         &mut active,
-                        &mut last_notif_id,
+                        &mut session_notif,
                         &mut dismissed,
-                        &mut last_prompt_id,
+                        &mut last_prompt_ids,
                     ).await,
 
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -247,7 +250,8 @@ async fn run(
                     Ok(evt) => handle_turn_done(
                         &proxy,
                         evt,
-                        &mut turn_done_notif_ids,
+                        &mut active,
+                        &mut session_notif,
                         turn_done_expire_ms,
                     ).await,
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -271,6 +275,7 @@ async fn run(
                                 args.id,
                                 &args.action_key,
                                 &mut active,
+                                &mut session_notif,
                                 &mut first_stale_click_seen,
                             ).await;
                         }
@@ -287,7 +292,12 @@ async fn run(
                 match signal {
                     Some(sig) => {
                         if let Ok(args) = sig.args() {
-                            handle_closed(args.id, &mut active, &mut dismissed);
+                            handle_closed(
+                                args.id,
+                                &mut active,
+                                &mut session_notif,
+                                &mut dismissed,
+                            );
                         }
                     }
                     None => {
@@ -300,8 +310,33 @@ async fn run(
     }
 
     // Clean up any lingering notifications before the task exits.
-    close_all(&proxy, &mut active).await;
+    close_all(&proxy, &mut active, &mut session_notif).await;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ActiveNotif — what's currently on screen, per notif_id
+// ---------------------------------------------------------------------------
+
+/// Metadata for one currently-visible notification.  Lives in the
+/// notif_id-keyed `active` map so signal handlers can look up "what was
+/// this notification about?" by `notif_id`.
+struct ActiveNotif {
+    /// Session this notification belongs to — used to clear the
+    /// `session_notif` reverse-map entry on close.
+    session_id: String,
+    /// What kind of notification this is.
+    kind: ActiveKind,
+}
+
+enum ActiveKind {
+    /// An approval-prompt notification with action buttons.
+    /// `tool_use_id` is what we'd send back to the aggregator on click.
+    Approval { tool_use_id: String },
+    /// A "Claude is done" turn-done notification — no actions, but we
+    /// still track it so the next post on the same session can use the
+    /// previous notif_id as `replaces_id`.
+    TurnDone,
 }
 
 // ---------------------------------------------------------------------------
@@ -311,152 +346,191 @@ async fn run(
 async fn handle_heartbeat(
     proxy: &NotificationsProxy<'_>,
     hb: Heartbeat,
-    active: &mut HashMap<u32, String>,
-    last_notif_id: &mut u32,
+    active: &mut HashMap<u32, ActiveNotif>,
+    session_notif: &mut HashMap<String, u32>,
     dismissed: &mut std::collections::HashSet<String>,
-    last_prompt_id: &mut Option<String>,
+    last_prompt_ids: &mut HashMap<String, String>,
 ) {
-    match hb.prompt {
-        Some(prompt) => {
-            // If the prompt id changed from the last heartbeat, clear the
-            // dismissed set — this is a new prompt the user hasn't seen yet.
-            if last_prompt_id.as_deref() != Some(&prompt.id) {
-                dismissed.clear();
-                *last_prompt_id = Some(prompt.id.clone());
+    use std::collections::HashSet;
+
+    // Index incoming prompts by session_id.  A prompt without a session_id
+    // is treated as belonging to a synthetic session whose id is the prompt
+    // id itself — that's a defensive path; the aggregator always populates
+    // session_id, so this branch should never hit in practice.
+    let mut by_session: HashMap<String, &PromptInfo> = HashMap::new();
+    for p in &hb.prompts {
+        let key = p.session_id.clone().unwrap_or_else(|| p.id.clone());
+        by_session.insert(key, p);
+    }
+
+    // (1) Close notifications for sessions that are no longer waiting.
+    let stale_sessions: Vec<String> = session_notif
+        .keys()
+        .filter(|sid| {
+            // Only close approval-slot notifications when the session no
+            // longer has a pending prompt.  Turn-done notifications stay
+            // visible for their own expire_timeout — heartbeat changes
+            // shouldn't yank them off screen.
+            if by_session.contains_key(sid.as_str()) {
+                return false;
             }
-
-            // If the user already dismissed this notification, do not re-post.
-            if dismissed.contains(&prompt.id) {
-                return;
-            }
-
-            // A permission prompt is pending.  Post (or replace) the notification.
-
-            // Derive display helpers for session context.
-            let cwd_short = prompt
-                .cwd
-                .as_deref()
-                .map(shorten_cwd)
-                .filter(|s| !s.is_empty());
-            let agent_or_main = prompt.agent_type.as_deref().unwrap_or("main");
-            let session_short = prompt
-                .session_id
-                .as_deref()
-                .map(crate::util::short_session_id);
-
-            // Summary: include cwd when available so parallel notifications
-            // are visually distinct in the swaync stack.
-            let summary = match cwd_short.as_deref() {
-                Some(c) => format!("Claude Code [{}]: approve {}?", c, prompt.tool),
-                None => format!("Claude Code: approve {}?", prompt.tool),
-            };
-
-            // Body: start with the hint, then add session/agent context line,
-            // then the allowlist-match annotation if present.
-            let mut body = prompt.hint.clone();
-
-            // Context line — omit when we have no useful identifiers.
-            if cwd_short.is_some() || session_short.is_some() {
-                let context = format!(
-                    "[{} · {} · {}]",
-                    cwd_short.as_deref().unwrap_or("?"),
-                    agent_or_main,
-                    session_short.as_deref().unwrap_or("?"),
+            session_notif
+                .get(sid.as_str())
+                .and_then(|nid| active.get(nid))
+                .map(|n| matches!(n.kind, ActiveKind::Approval { .. }))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    for sid in stale_sessions {
+        if let Some(nid) = session_notif.remove(&sid) {
+            if let Some(notif) = active.remove(&nid) {
+                debug!(
+                    notif_id = nid,
+                    session_id = %sid,
+                    "notify: prompt cleared — closing approval notification",
                 );
-                body.push('\n');
-                body.push_str(&context);
-            }
-
-            // Allowlist annotation.
-            if let (Some(pattern), Some(source)) = (
-                prompt.matched_pattern.as_ref(),
-                prompt.matched_source.as_ref(),
-            ) {
-                let source_label = match source {
-                    MatchSource::Allow => "allowlists",
-                    MatchSource::Deny => "denies",
-                };
-                body.push_str(&format!(
-                    "\n[Claude {} this with pattern {:?} — confirm to override]",
-                    source_label, pattern,
-                ));
-            }
-
-            // (body is now the composite of hint + context + optional annotation)
-
-            // actions: flat list of (key, label) pairs.
-            // "default" key = clicking the notification body.
-            let actions: &[&str] = &[
-                "default",
-                "Approve once",
-                "once",
-                "Approve once",
-                "always",
-                "Always",
-                "deny",
-                "Deny",
-            ];
-
-            // hints: urgency = 2 (critical) — never auto-dismissed.
-            let mut hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
-            hints.insert("urgency", zbus::zvariant::Value::U8(2));
-
-            // expire_timeout: 0 = never expire (spec §4.4).
-            let expire_timeout: i32 = 0;
-
-            // replaces_id: pass the last issued ID so swaync replaces in-place.
-            // On the very first call last_notif_id is 0 ("no replacement").
-            let replaces_id = *last_notif_id;
-
-            match proxy
-                .notify(
-                    "ccbridge",
-                    replaces_id,
-                    "",
-                    &summary,
-                    &body,
-                    actions,
-                    &hints,
-                    expire_timeout,
-                )
-                .await
-            {
-                Ok(id) => {
-                    debug!(
-                        notif_id = id,
-                        tool_use_id = %prompt.id,
-                        tool = %prompt.tool,
-                        "notify: notification posted",
-                    );
-                    // If this replaced a previous notification it already closed
-                    // the old one server-side; we just update our map.
-                    if replaces_id != 0 && replaces_id != id {
-                        active.remove(&replaces_id);
-                    }
-                    active.insert(id, prompt.id);
-                    *last_notif_id = id;
+                if let Err(e) = proxy.close_notification(nid).await {
+                    debug!(notif_id = nid, "notify: CloseNotification: {e}");
                 }
-                Err(e) => {
-                    warn!("notify: Notify call failed: {e}");
+                // Drop dismissal tracking for any prompt that belonged to
+                // this session.
+                if let ActiveKind::Approval { tool_use_id } = notif.kind {
+                    dismissed.remove(&tool_use_id);
                 }
             }
         }
+        last_prompt_ids.remove(&sid);
+    }
 
-        None => {
-            // No pending prompt — a decision arrived from another emitter (BLE,
-            // ctrl socket) or the session resolved naturally.  Close everything.
-            if !active.is_empty() {
-                debug!(
-                    "notify: prompt cleared externally — closing {} notification(s)",
-                    active.len()
-                );
-                close_all(proxy, active).await;
-                *last_notif_id = 0;
+    // Also drop dismissal entries whose tool_use_id is no longer in any
+    // visible heartbeat — covers the case where a session's prompt id
+    // rotated mid-session but we hadn't seen the next heartbeat yet.
+    let live_ids: HashSet<&str> = hb.prompts.iter().map(|p| p.id.as_str()).collect();
+    dismissed.retain(|tid| live_ids.contains(tid.as_str()));
+
+    // (2) Post / replace one approval notification per pending session.
+    for (session_key, prompt) in by_session.iter() {
+        // Detect prompt rotation within the same session — drop the old
+        // dismissal record so the new prompt isn't suppressed.
+        let prev = last_prompt_ids.insert(session_key.clone(), prompt.id.clone());
+        if let Some(old_id) = prev {
+            if old_id != prompt.id {
+                dismissed.remove(&old_id);
             }
-            // Clear dismissed set and last_prompt_id: next prompt is fresh.
-            if last_prompt_id.is_some() {
-                dismissed.clear();
-                *last_prompt_id = None;
+        }
+
+        if dismissed.contains(&prompt.id) {
+            continue; // user dismissed this exact prompt; don't re-post
+        }
+
+        // Derive display helpers for session context.
+        let cwd_short = prompt
+            .cwd
+            .as_deref()
+            .map(shorten_cwd)
+            .filter(|s| !s.is_empty());
+        let agent_or_main = prompt.agent_type.as_deref().unwrap_or("main");
+        let session_short = prompt
+            .session_id
+            .as_deref()
+            .map(crate::util::short_session_id);
+
+        // Summary: include cwd when available so parallel notifications
+        // are visually distinct in the swaync stack.
+        let summary = match cwd_short.as_deref() {
+            Some(c) => format!("Claude Code [{}]: approve {}?", c, prompt.tool),
+            None => format!("Claude Code: approve {}?", prompt.tool),
+        };
+
+        // Body: start with the hint, then add session/agent context line,
+        // then the allowlist-match annotation if present.
+        let mut body = prompt.hint.clone();
+
+        if cwd_short.is_some() || session_short.is_some() {
+            let context = format!(
+                "[{} · {} · {}]",
+                cwd_short.as_deref().unwrap_or("?"),
+                agent_or_main,
+                session_short.as_deref().unwrap_or("?"),
+            );
+            body.push('\n');
+            body.push_str(&context);
+        }
+
+        if let (Some(pattern), Some(source)) = (
+            prompt.matched_pattern.as_ref(),
+            prompt.matched_source.as_ref(),
+        ) {
+            let source_label = match source {
+                MatchSource::Allow => "allowlists",
+                MatchSource::Deny => "denies",
+            };
+            body.push_str(&format!(
+                "\n[Claude {} this with pattern {:?} — confirm to override]",
+                source_label, pattern,
+            ));
+        }
+
+        let actions: &[&str] = &[
+            "default",
+            "Approve once",
+            "once",
+            "Approve once",
+            "always",
+            "Always",
+            "deny",
+            "Deny",
+        ];
+
+        let mut hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+        hints.insert("urgency", zbus::zvariant::Value::U8(2)); // critical
+
+        // replaces_id: prior notif for this session, if any.  0 = new slot.
+        // This may be a turn-done notif id from a previous turn — replacing
+        // it with a fresh approval is the correct behaviour (the stale
+        // "Claude is done" disappears the moment a new prompt arrives).
+        let replaces_id = session_notif.get(session_key).copied().unwrap_or(0);
+
+        match proxy
+            .notify(
+                "ccbridge",
+                replaces_id,
+                "",
+                &summary,
+                &body,
+                actions,
+                &hints,
+                0, // expire_timeout: 0 = never expire (critical urgency)
+            )
+            .await
+        {
+            Ok(id) => {
+                debug!(
+                    notif_id = id,
+                    session_id = %session_key,
+                    tool_use_id = %prompt.id,
+                    tool = %prompt.tool,
+                    "notify: approval notification posted",
+                );
+                // Server replaced the old notif in place — drop our stale
+                // active entry for the previous notif_id.
+                if replaces_id != 0 && replaces_id != id {
+                    active.remove(&replaces_id);
+                }
+                active.insert(
+                    id,
+                    ActiveNotif {
+                        session_id: session_key.clone(),
+                        kind: ActiveKind::Approval {
+                            tool_use_id: prompt.id.clone(),
+                        },
+                    },
+                );
+                session_notif.insert(session_key.clone(), id);
+            }
+            Err(e) => {
+                warn!("notify: Notify call failed: {e}");
             }
         }
     }
@@ -474,7 +548,8 @@ async fn handle_heartbeat(
 async fn handle_turn_done(
     proxy: &NotificationsProxy<'_>,
     evt: crate::state::TurnDoneEvent,
-    turn_done_notif_ids: &mut HashMap<String, u32>,
+    active: &mut HashMap<u32, ActiveNotif>,
+    session_notif: &mut HashMap<String, u32>,
     expire_ms: i32,
 ) {
     let cwd_basename = std::path::Path::new(&evt.cwd)
@@ -498,10 +573,12 @@ async fn handle_turn_done(
         zbus::zvariant::Value::U8(1), // 1 = normal
     );
 
-    let replaces_id = turn_done_notif_ids
-        .get(&evt.session_id)
-        .copied()
-        .unwrap_or(0);
+    // Reuse this session's notif slot if any — replaces a previous
+    // turn-done OR a stale approval prompt.  The Stop handler in the
+    // aggregator clears `pending` before broadcasting, so an approval
+    // for the same session can't actually still be pending here, but
+    // collapsing to one slot is still the right shape if it ever did.
+    let replaces_id = session_notif.get(&evt.session_id).copied().unwrap_or(0);
 
     match proxy
         .notify(
@@ -522,7 +599,17 @@ async fn handle_turn_done(
                 notif_id = id,
                 "notify: posted turn-done notification",
             );
-            turn_done_notif_ids.insert(evt.session_id, id);
+            if replaces_id != 0 && replaces_id != id {
+                active.remove(&replaces_id);
+            }
+            active.insert(
+                id,
+                ActiveNotif {
+                    session_id: evt.session_id.clone(),
+                    kind: ActiveKind::TurnDone,
+                },
+            );
+            session_notif.insert(evt.session_id, id);
         }
         Err(e) => {
             warn!(
@@ -542,13 +629,14 @@ async fn handle_action(
     agg_tx: &AggregatorTx,
     notif_id: u32,
     action_key: &str,
-    active: &mut HashMap<u32, String>,
+    active: &mut HashMap<u32, ActiveNotif>,
+    session_notif: &mut HashMap<String, u32>,
     first_stale_click_seen: &mut bool,
 ) {
     // Stale-click guard: if this notif_id isn't in our map it's from a previous
     // prompt that we already handled or replaced (e.g. after a daemon restart).
-    let tool_use_id = match active.remove(&notif_id) {
-        Some(id) => id,
+    let notif = match active.remove(&notif_id) {
+        Some(n) => n,
         None => {
             debug!(
                 notif_id,
@@ -581,8 +669,19 @@ async fn handle_action(
         }
     };
 
+    let ActiveKind::Approval { tool_use_id } = notif.kind else {
+        // Turn-done has no actions — clicking the body would only fire
+        // `default`, which we don't bind for turn-done.  Defensive: put
+        // the entry back and ignore.
+        debug!(notif_id, "notify: action on non-approval notif — ignoring");
+        active.insert(notif_id, notif);
+        return;
+    };
+    let session_id = notif.session_id;
+
     debug!(
         notif_id,
+        session_id = %session_id,
         tool_use_id = %tool_use_id,
         action = action_key,
         "notify: user actioned notification",
@@ -599,8 +698,6 @@ async fn handle_action(
                 .await;
         }
         "always" => {
-            // Tell the aggregator to derive + write the allow pattern, then
-            // approve this call.
             let _ = agg_tx
                 .send(AggregatorMsg::AllowlistAlways { tool_use_id })
                 .await;
@@ -621,14 +718,22 @@ async fn handle_action(
                 "notify: unknown action key — ignoring"
             );
             // Put it back: we consumed it from the map but didn't act.
-            active.insert(notif_id, tool_use_id);
+            active.insert(
+                notif_id,
+                ActiveNotif {
+                    session_id,
+                    kind: ActiveKind::Approval { tool_use_id },
+                },
+            );
             return;
         }
     }
 
-    // Close any remaining active notifications for the same prompt (there
-    // should be at most one, but close_all is idempotent).
-    close_all(proxy, active).await;
+    // Drop the session-slot mapping; the next heartbeat (with the prompt
+    // gone for this session) will close anything else that lingers.
+    if session_notif.get(&session_id).copied() == Some(notif_id) {
+        session_notif.remove(&session_id);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -637,20 +742,34 @@ async fn handle_action(
 
 fn handle_closed(
     notif_id: u32,
-    active: &mut HashMap<u32, String>,
+    active: &mut HashMap<u32, ActiveNotif>,
+    session_notif: &mut HashMap<String, u32>,
     dismissed: &mut std::collections::HashSet<String>,
 ) {
-    if let Some(tool_use_id) = active.remove(&notif_id) {
-        // User dismissed without clicking an action.
-        // Record the tool_use_id so the next heartbeat (which still carries
-        // the same prompt) does not immediately re-post the notification.
-        // The dismissed set is cleared when the prompt id changes or clears.
-        debug!(
-            notif_id,
-            tool_use_id = %tool_use_id,
-            "notify: notification dismissed — suppressing re-post until prompt clears",
-        );
-        dismissed.insert(tool_use_id);
+    if let Some(notif) = active.remove(&notif_id) {
+        // Drop the session→notif_id mapping if it still points here (the
+        // server may already have replaced this notif on its end).
+        if session_notif.get(&notif.session_id).copied() == Some(notif_id) {
+            session_notif.remove(&notif.session_id);
+        }
+        match notif.kind {
+            ActiveKind::Approval { tool_use_id } => {
+                // User dismissed an approval prompt without clicking an action.
+                // Record the tool_use_id so the next heartbeat (which still
+                // carries the same prompt) does not immediately re-post.
+                debug!(
+                    notif_id,
+                    tool_use_id = %tool_use_id,
+                    "notify: approval dismissed — suppressing re-post until prompt clears",
+                );
+                dismissed.insert(tool_use_id);
+            }
+            ActiveKind::TurnDone => {
+                // Turn-done dismissal is silent — there's no re-post path
+                // (broadcasts fire once per Stop), so nothing to record.
+                debug!(notif_id, "notify: turn-done notification closed");
+            }
+        }
     }
 }
 
@@ -658,13 +777,22 @@ fn handle_closed(
 // close_all helper
 // ---------------------------------------------------------------------------
 
-/// Close every notification in `active` and clear the map.
+/// Close every notification in `active` and clear the map (and the
+/// `session_notif` reverse-map).
 ///
 /// `CloseNotification` on a stale/already-closed ID is a no-op per spec, so
 /// it is always safe to call this unconditionally.
-async fn close_all(proxy: &NotificationsProxy<'_>, active: &mut HashMap<u32, String>) {
-    for (id, tool_use_id) in active.drain() {
-        debug!(notif_id = id, tool_use_id = %tool_use_id, "notify: closing notification");
+async fn close_all(
+    proxy: &NotificationsProxy<'_>,
+    active: &mut HashMap<u32, ActiveNotif>,
+    session_notif: &mut HashMap<String, u32>,
+) {
+    for (id, notif) in active.drain() {
+        debug!(
+            notif_id = id,
+            session_id = %notif.session_id,
+            "notify: closing notification",
+        );
         if let Err(e) = proxy.close_notification(id).await {
             debug!(
                 notif_id = id,
@@ -672,6 +800,7 @@ async fn close_all(proxy: &NotificationsProxy<'_>, active: &mut HashMap<u32, Str
             );
         }
     }
+    session_notif.clear();
 }
 
 // ---------------------------------------------------------------------------

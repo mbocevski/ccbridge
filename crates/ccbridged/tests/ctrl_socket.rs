@@ -139,7 +139,7 @@ async fn connect_receives_hello_and_snapshot() {
     assert_eq!(hb.total, 0);
     assert_eq!(hb.running, 0);
     assert_eq!(hb.waiting, 0);
-    assert!(hb.prompt.is_none());
+    assert!(hb.prompts.is_empty());
 }
 
 /// `{"cmd":"subscribe","topics":["heartbeat"]}` receives `{"ack":"subscribe","ok":true}`.
