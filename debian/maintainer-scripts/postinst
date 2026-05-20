@@ -2,11 +2,6 @@
 set -e
 case "$1" in
     configure)
-        # Reload systemd's user-instance unit cache so the new
-        # ccbridge.service unit is visible to `systemctl --user`.
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl --global daemon-reload || true
-        fi
         cat <<'EOF'
 
   ccbridge installed. Run once per user account to wire it up:
