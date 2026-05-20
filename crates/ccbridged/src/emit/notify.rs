@@ -621,7 +621,7 @@ async fn handle_turn_done(
     // via the heartbeat (ctrl socket / Waybar); the notification body is
     // about *this* task.
     body.push_str(&format!(
-        "{} turn",
+        "{} tokens/turn",
         format_token_count(evt.tokens_this_turn)
     ));
 
