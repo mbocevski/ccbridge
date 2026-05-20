@@ -12,9 +12,6 @@ name = "ccbridge-hook"
 path = "src/main.rs"
 
 [dependencies]
-# Pure std — no external dependencies.  Keeps the binary small (<500 KB
-# stripped) and cold-start fast (<5 ms).  No tokio: synchronous I/O is
-# sufficient for a short-lived shim.
 
 [dev-dependencies]
 tempfile = "3"

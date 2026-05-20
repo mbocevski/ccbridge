@@ -336,8 +336,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 1: permission_mode short-circuit (unchanged from Phase 1 tests;
-    // now also pass an empty allowlist to ensure mode still wins).
+    // permission_mode short-circuit
     // -----------------------------------------------------------------------
 
     #[test]
