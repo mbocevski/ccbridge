@@ -97,7 +97,16 @@ pub enum AggregatorMsg {
     GetHeartbeat { respond: oneshot::Sender<Heartbeat> },
 
     /// Token counts updated by the JSONL tail (task 27993d8d).
-    TokensUpdate { output_tokens: u64 },
+    ///
+    /// `session_id` is the JSONL file's UUID stem when known.  When
+    /// present, the aggregator also bumps that session's
+    /// `tokens_this_turn` counter (used to populate the turn-done
+    /// notification body).  None is acceptable for the global cumulative
+    /// path; only the per-turn display loses precision in that case.
+    TokensUpdate {
+        output_tokens: u64,
+        session_id: Option<SessionId>,
+    },
 
     /// One-shot at daemon startup: seed the aggregator's `TokenState`
     /// from the persisted `tokens.json` so heartbeats reflect the full
@@ -175,6 +184,10 @@ pub struct TurnDoneSnapshot {
     pub cwd: String,
     /// Cumulative token count at Stop time.
     pub tokens_cumulative: u64,
+    /// Output tokens for the current user task (since the last
+    /// `UserPromptSubmit` for this session).  Surfaced in the
+    /// turn-done notification body as e.g. `"1.2k turn"`.
+    pub tokens_this_turn: u64,
 }
 
 /// Outcome of an `AggregatorMsg::PermissionDecision`, returned through
@@ -288,6 +301,12 @@ pub struct Session {
     /// "Claude is done" notification.  Stop itself does NOT bump (a Stop
     /// is exactly the moment we want to start the idle clock from).
     pub last_activity_serial: u64,
+    /// Output tokens generated since this session's last `UserPromptSubmit`
+    /// (i.e. the user's current task — covers all assistant turns and
+    /// tool-call rounds within it).  Reset to 0 on `UserPromptSubmit` so
+    /// the next task starts from zero.  Surfaced in the turn-done
+    /// notification body.
+    pub tokens_this_turn: u64,
 }
 
 impl Session {
@@ -299,6 +318,7 @@ impl Session {
             waiting: false,
             pending_tool_use_id: None,
             last_activity_serial: 0,
+            tokens_this_turn: 0,
         }
     }
 
@@ -331,6 +351,9 @@ pub struct TurnDoneEvent {
     pub response_snippet: String,
     pub cwd: String,
     pub tokens_cumulative: u64,
+    /// Output tokens for the user task that just finished — i.e.
+    /// since the last `UserPromptSubmit` for this session.
+    pub tokens_this_turn: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +719,10 @@ impl Aggregator {
                 // for this session sees the user is back at the keyboard
                 // and skips the "Claude is done" notification.
                 session.bump_activity();
+                // New user task → reset the per-task token counter.  The
+                // turn-done notification at the end of THIS task will show
+                // tokens generated from this point onward.
+                session.tokens_this_turn = 0;
                 self.broadcast_heartbeat();
                 let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
@@ -877,11 +904,9 @@ impl Aggregator {
             return;
         };
         let session_id = e.base.session_id.clone();
-        let activity_serial = self
-            .sessions
-            .get(&session_id)
-            .map(|s| s.last_activity_serial)
-            .unwrap_or(0);
+        let session = self.sessions.get(&session_id);
+        let activity_serial = session.map(|s| s.last_activity_serial).unwrap_or(0);
+        let tokens_this_turn = session.map(|s| s.tokens_this_turn).unwrap_or(0);
         let snapshot = TurnDoneSnapshot {
             response_snippet: e
                 .response
@@ -890,6 +915,7 @@ impl Aggregator {
                 .unwrap_or_default(),
             cwd: e.base.cwd.clone(),
             tokens_cumulative: self.tokens.cumulative,
+            tokens_this_turn,
         };
         let grace = self.turn_done_idle_grace;
         tokio::spawn(async move {
@@ -932,6 +958,7 @@ impl Aggregator {
             response_snippet: snapshot.response_snippet,
             cwd: snapshot.cwd,
             tokens_cumulative: snapshot.tokens_cumulative,
+            tokens_this_turn: snapshot.tokens_this_turn,
         });
     }
 
@@ -973,9 +1000,19 @@ impl Aggregator {
                         Some(AggregatorMsg::GetHeartbeat { respond }) => {
                             let _ = respond.send(self.snapshot());
                         }
-                        Some(AggregatorMsg::TokensUpdate { output_tokens }) => {
+                        Some(AggregatorMsg::TokensUpdate { output_tokens, session_id }) => {
                             self.tokens.cumulative += output_tokens;
                             self.tokens.today += output_tokens;
+                            // Per-session counter so the turn-done notif can
+                            // show `"1.2k turn"` for just this user task.
+                            // Only bumped when the JSONL watcher could
+                            // attribute the line to a session; the global
+                            // totals above are unconditional.
+                            if let Some(sid) = session_id {
+                                if let Some(s) = self.sessions.get_mut(&sid) {
+                                    s.tokens_this_turn += output_tokens;
+                                }
+                            }
                             self.broadcast_heartbeat();
                         }
                         Some(AggregatorMsg::SetInitialTokens { cumulative, today, date }) => {
@@ -1950,11 +1987,13 @@ mod tests {
 
         tx.send(AggregatorMsg::TokensUpdate {
             output_tokens: 5_000,
+            session_id: None,
         })
         .await
         .unwrap();
         tx.send(AggregatorMsg::TokensUpdate {
             output_tokens: 3_000,
+            session_id: None,
         })
         .await
         .unwrap();
@@ -2014,9 +2053,12 @@ mod tests {
         }
 
         // A subsequent TokensUpdate adds on top, not replaces.
-        tx.send(AggregatorMsg::TokensUpdate { output_tokens: 200 })
-            .await
-            .unwrap();
+        tx.send(AggregatorMsg::TokensUpdate {
+            output_tokens: 200,
+            session_id: None,
+        })
+        .await
+        .unwrap();
         loop {
             let hb = hb_rx.recv().await.unwrap();
             if hb.tokens == 184_702 {
@@ -2043,6 +2085,7 @@ mod tests {
         // Simulate a TokensUpdate landing first.
         tx.send(AggregatorMsg::TokensUpdate {
             output_tokens: 200_000,
+            session_id: None,
         })
         .await
         .unwrap();
@@ -2165,6 +2208,69 @@ mod tests {
             .expect("broadcast still open");
         assert_eq!(evt.session_id, "sess_td");
         assert_eq!(evt.response_snippet, "done");
+    }
+
+    #[tokio::test]
+    async fn turn_done_carries_tokens_for_current_user_task_only() {
+        // Two prompts in sequence on the same session.  Each user task's
+        // turn-done event must carry only the tokens generated *during*
+        // that task — UserPromptSubmit at the start of task 2 must reset
+        // tokens_this_turn to zero.
+        let (tx, _hb_rx, mut td_rx) = spawn_with_turn_done(Duration::from_millis(50));
+
+        let send_event = |evt: HookEvent| {
+            let tx = tx.clone();
+            async move {
+                let (r, _) = oneshot::channel();
+                tx.send(AggregatorMsg::HookEvent {
+                    event: Box::new(evt),
+                    respond: r,
+                })
+                .await
+                .unwrap();
+            }
+        };
+
+        // Task 1: SessionStart → UserPromptSubmit → 1500 tokens accumulate
+        // → Stop → idle gate fires.
+        send_event(session_start_event("sess_turn")).await;
+        send_event(user_prompt_event("sess_turn")).await;
+        tx.send(AggregatorMsg::TokensUpdate {
+            output_tokens: 1_500,
+            session_id: Some("sess_turn".to_owned()),
+        })
+        .await
+        .unwrap();
+        send_event(stop_event("sess_turn")).await;
+
+        let evt1 = tokio::time::timeout(Duration::from_secs(2), td_rx.recv())
+            .await
+            .expect("first turn-done must fire")
+            .expect("broadcast open");
+        assert_eq!(evt1.session_id, "sess_turn");
+        assert_eq!(evt1.tokens_this_turn, 1_500);
+        // Cumulative reflects everything the aggregator has seen so far.
+        assert_eq!(evt1.tokens_cumulative, 1_500);
+
+        // Task 2: UserPromptSubmit (resets tokens_this_turn) → 800 tokens
+        // accumulate → Stop → idle gate fires.  The new event must carry
+        // 800, not 2300.
+        send_event(user_prompt_event("sess_turn")).await;
+        tx.send(AggregatorMsg::TokensUpdate {
+            output_tokens: 800,
+            session_id: Some("sess_turn".to_owned()),
+        })
+        .await
+        .unwrap();
+        send_event(stop_event("sess_turn")).await;
+
+        let evt2 = tokio::time::timeout(Duration::from_secs(2), td_rx.recv())
+            .await
+            .expect("second turn-done must fire")
+            .expect("broadcast open");
+        assert_eq!(evt2.tokens_this_turn, 800, "must reset on UserPromptSubmit");
+        // Global cumulative keeps growing across turns.
+        assert_eq!(evt2.tokens_cumulative, 2_300);
     }
 
     #[tokio::test]

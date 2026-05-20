@@ -185,6 +185,13 @@ async fn handle_event(
             continue;
         }
 
+        // The JSONL filename (without .jsonl) is the session UUID.
+        // Pass it on TokensUpdate so the aggregator can track per-session
+        // running totals (tokens_this_turn for the turn-done notification).
+        // Falls back to None on a non-utf8 stem; the aggregator's global
+        // cumulative still updates either way.
+        let session_id = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned);
+
         offsets.drain_new_lines(path, |line| {
             let Some(parsed) = parse_jsonl_line(line) else {
                 return;
@@ -198,10 +205,12 @@ async fn handle_event(
                 // Fire-and-forget: if aggregator is gone, we just log.
                 let tx = agg_tx.clone();
                 let tokens = parsed.output_tokens;
+                let sid = session_id.clone();
                 tokio::spawn(async move {
                     if tx
                         .send(crate::state::AggregatorMsg::TokensUpdate {
                             output_tokens: tokens,
+                            session_id: sid,
                         })
                         .await
                         .is_err()

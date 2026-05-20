@@ -617,9 +617,12 @@ async fn handle_turn_done(
     if !body.is_empty() {
         body.push('\n');
     }
+    // Just the per-turn count.  Cumulative + today are already visible
+    // via the heartbeat (ctrl socket / Waybar); the notification body is
+    // about *this* task.
     body.push_str(&format!(
-        "{} tokens",
-        format_token_count(evt.tokens_cumulative)
+        "{} turn",
+        format_token_count(evt.tokens_this_turn)
     ));
 
     let mut hints = HashMap::new();

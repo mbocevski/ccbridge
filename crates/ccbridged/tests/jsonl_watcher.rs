@@ -242,6 +242,7 @@ async fn watcher_loads_initial_token_state() {
     agg_tx
         .send(AggregatorMsg::TokensUpdate {
             output_tokens: 10_000,
+            session_id: None,
         })
         .await
         .unwrap();

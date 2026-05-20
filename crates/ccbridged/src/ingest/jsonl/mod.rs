@@ -307,6 +307,7 @@ mod tests {
         agg_tx
             .send(crate::state::AggregatorMsg::TokensUpdate {
                 output_tokens: 184_502,
+                session_id: None,
             })
             .await
             .unwrap();
