@@ -320,19 +320,24 @@ pub fn validate_audit_root(root: &Path, user_global_dir: &Path) -> Result<()> {
     if root == Path::new("/") {
         anyhow::bail!("audit log contains filesystem root '/' as project root — refusing undo");
     }
-    // Best-effort canonicalisation: skip if the directory doesn't exist yet.
+    // Canonicalise when the directory exists; otherwise fall back to a
+    // purely lexical normalisation so paths like `/home/user/.claude/.`
+    // or `/home/user/foo/../.claude` collapse before the collision check.
+    // Without this, a tampered audit line can bypass the user-global
+    // collision check until the directory is materialised, then start
+    // writing to ~/.claude/settings.local.json.
     let canonical_root = if root.exists() {
         root.canonicalize()
             .with_context(|| format!("canonicalize {:?}", root))?
     } else {
-        root.to_path_buf()
+        lexically_normalize(root)
     };
     let canonical_ugd = if user_global_dir.exists() {
         user_global_dir
             .canonicalize()
             .with_context(|| format!("canonicalize {:?}", user_global_dir))?
     } else {
-        user_global_dir.to_path_buf()
+        lexically_normalize(user_global_dir)
     };
     if canonical_root == canonical_ugd {
         anyhow::bail!(
@@ -343,6 +348,38 @@ pub fn validate_audit_root(root: &Path, user_global_dir: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Collapse `.` and `..` components in `path` without touching the
+/// filesystem. Used as a fallback when `canonicalize` can't run because
+/// the directory doesn't exist yet.
+///
+/// `..` past the root (or before any normal component) is silently dropped;
+/// in security-validation contexts that's the conservative choice — the
+/// caller is checking equality with a known-good prefix, and an
+/// over-popped path won't accidentally match it.
+fn lexically_normalize(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp),
+            Component::CurDir => {} // drop "."
+            Component::ParentDir => {
+                // Pop the last Normal component if there is one; otherwise
+                // drop (don't escape past the root we've already pushed).
+                let popped = out
+                    .components()
+                    .next_back()
+                    .map(|c| matches!(c, Component::Normal(_)));
+                if popped == Some(true) {
+                    out.pop();
+                }
+            }
+            Component::Normal(c) => out.push(c),
+        }
+    }
+    out
 }
 
 /// Remove the most-recent un-undone allowlist addition and mark it as undone.
@@ -1102,6 +1139,52 @@ mod tests {
         let ugd = TempDir::new().unwrap();
         // Two distinct temp dirs — must pass.
         validate_audit_root(dir.path(), ugd.path()).unwrap();
+    }
+
+    #[test]
+    fn validate_audit_root_rejects_trailing_dot_collision_when_dir_absent() {
+        // Tampered audit line: root is `/path/to/.claude/.` and the
+        // directory doesn't exist yet (so canonicalize can't run).
+        // Without lexical normalisation this would pass the equality
+        // check and later silently write to ~/.claude/settings.local.json.
+        let nonexistent_ugd = std::path::PathBuf::from("/this/path/does/not/exist/.claude");
+        let tampered_root = std::path::PathBuf::from("/this/path/does/not/exist/.claude/.");
+        let err = validate_audit_root(&tampered_root, &nonexistent_ugd).unwrap_err();
+        assert!(
+            err.to_string().contains("collides"),
+            "error must catch the lexical collision via `.` collapse, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_audit_root_rejects_parent_dir_collision_when_dir_absent() {
+        // Tampered audit line: `/path/foo/../.claude` resolves lexically
+        // to `/path/.claude`. Must be rejected as a collision when that
+        // matches the user-global dir.
+        let nonexistent_ugd = std::path::PathBuf::from("/no/such/path/.claude");
+        let tampered_root = std::path::PathBuf::from("/no/such/path/foo/../.claude");
+        let err = validate_audit_root(&tampered_root, &nonexistent_ugd).unwrap_err();
+        assert!(
+            err.to_string().contains("collides"),
+            "error must catch the lexical collision via `..` resolution, got: {err}"
+        );
+    }
+
+    #[test]
+    fn lexically_normalize_collapses_dot_and_parent() {
+        let p = std::path::PathBuf::from("/a/b/c/./../d");
+        assert_eq!(
+            lexically_normalize(&p),
+            std::path::PathBuf::from("/a/b/d"),
+        );
+
+        let p = std::path::PathBuf::from("/a/.");
+        assert_eq!(lexically_normalize(&p), std::path::PathBuf::from("/a"));
+
+        let p = std::path::PathBuf::from("/a/../../b");
+        // `..` past the root is dropped — `/a/..` → `/`, then `..` past
+        // `/` is dropped, then `/b`. Conservative for security checks.
+        assert_eq!(lexically_normalize(&p), std::path::PathBuf::from("/b"));
     }
 
     #[test]
