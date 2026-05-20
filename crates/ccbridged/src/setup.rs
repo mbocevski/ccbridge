@@ -335,10 +335,29 @@ pub fn save_settings(path: &Path, settings: &Value) -> Result<()> {
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
 
     // fsync the parent directory so the rename (directory entry change)
-    // survives a power loss.
+    // survives a power loss. Failure here doesn't fail the write — the
+    // settings file is already on disk and the rename has happened — but
+    // it does mean the durability guarantee is weaker than expected.
+    // Log it as a forensic breadcrumb for "settings vanished after power
+    // loss" investigations rather than swallowing silently.
     if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
+        match std::fs::File::open(parent) {
+            Ok(dir) => {
+                if let Err(e) = dir.sync_all() {
+                    tracing::warn!(
+                        parent = %parent.display(),
+                        error = %e,
+                        "save_settings: parent-dir fsync failed; rename may not survive a power loss"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    parent = %parent.display(),
+                    error = %e,
+                    "save_settings: could not open parent dir for fsync"
+                );
+            }
         }
     }
 
