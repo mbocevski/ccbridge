@@ -1,0 +1,242 @@
+name: release
+
+# Two channels:
+#
+#   Stable: triggered by pushing a `v*` tag.  The .deb files attach to a
+#           GitHub Release and the apt repo's `stable` suite is updated.
+#   Beta:   triggered by every push to `main`.  No GitHub Release; the
+#           apt repo's `beta` suite gets a fresh .deb so adventurous
+#           users can `apt install -t beta` to track the bleeding edge.
+#
+# All artefacts are built on Ubuntu 24.04 LTS hosted runners (x86_64 +
+# arm64).  GitHub provides arm64 hosted runners on the free tier as
+# of late 2024 — no self-hosted infra needed.
+
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
+
+# Releases write to the repo (releases + gh-pages branch).
+permissions:
+  contents: write
+
+# Don't pile up beta builds; let later main pushes supersede earlier ones.
+# Stable tags are addressable individually so they don't share a group.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # build: cross-arch .deb matrix
+  # ---------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runs-on }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Strip leading `v` for the .deb version.
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+          else
+            # Beta build from main — version bakes in the short SHA so
+            # successive beta .debs never collide on filename.
+            short_sha="$(git rev-parse --short HEAD)"
+            base_ver="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+            echo "version=${base_ver}~beta.$(date -u +%Y%m%d).${short_sha}" >> "$GITHUB_OUTPUT"
+            echo "channel=beta" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.arch }}
+
+      - name: Install cargo-deb
+        # `cargo binstall` is faster than building from source, but adds
+        # another action; sticking with `cargo install` for transparency.
+        run: cargo install cargo-deb --locked --version "^2.0"
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --workspace --target ${{ matrix.target }}
+          # cargo-deb's [package.metadata.deb] assets reference
+          # `../../target/release/...` (no target subdir).  Symlink so
+          # the cross-compiled output ends up where cargo-deb looks.
+          mkdir -p target/release
+          cp -f target/${{ matrix.target }}/release/ccbridged target/release/
+          cp -f target/${{ matrix.target }}/release/ccbridge-hook target/release/
+
+      - name: Build .deb
+        working-directory: crates/ccbridged
+        run: |
+          cargo deb \
+            --no-build \
+            --no-strip \
+            --deb-version "${{ steps.version.outputs.version }}"
+
+      - name: Show .deb
+        run: |
+          ls -lh target/debian/
+          # Sanity-check the metadata so a malformed package never
+          # reaches users.
+          dpkg-deb -I target/debian/*.deb
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ matrix.arch }}
+          path: target/debian/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # release: attach .debs to a GitHub Release on stable tags
+  # ---------------------------------------------------------------------
+  release:
+    name: github release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - run: ls -lh dist/
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.deb
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------------
+  # apt-repo: build signed apt repo on gh-pages
+  # ---------------------------------------------------------------------
+  apt-repo:
+    name: apt repo (${{ needs.build.outputs.version }})
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: gh-pages
+          # If gh-pages doesn't exist yet, fall back to a fresh tree.
+          # peaceiris/actions-gh-pages handles the orphan-branch case
+          # itself, so an empty checkout is fine.
+          fetch-depth: 0
+        continue-on-error: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Import signing key
+        uses: crazy-max/ghaction-import-gpg@v7
+        with:
+          gpg_private_key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.APT_GPG_PASSPHRASE }}
+
+      - name: Install apt repo tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro
+
+      - name: Determine channel
+        id: channel
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "name=stable" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=beta" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build apt repo
+        env:
+          CHANNEL: ${{ steps.channel.outputs.name }}
+        run: |
+          # Keep any existing repo state from gh-pages so the other
+          # channel's packages aren't lost on every release.
+          mkdir -p public/apt/conf
+          # reprepro config: one suite per channel, both architectures.
+          # The `Codename` is what users put in their sources.list.
+          # SignWith uses the default secret key imported by
+          # ghaction-import-gpg.
+          KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          cat > public/apt/conf/distributions <<EOF
+          Codename: stable
+          Suite: stable
+          Components: main
+          Architectures: amd64 arm64
+          SignWith: $KEY_ID
+          Description: ccbridge stable releases
+
+          Codename: beta
+          Suite: beta
+          Components: main
+          Architectures: amd64 arm64
+          SignWith: $KEY_ID
+          Description: ccbridge beta builds (auto-published from main)
+          EOF
+          # Add every freshly-built .deb to the chosen channel.
+          for deb in dist/*.deb; do
+            reprepro -b public/apt --component main includedeb "$CHANNEL" "$deb"
+          done
+
+      - name: Export public key
+        run: |
+          # Ship the public key alongside the repo so users can fetch
+          # it with curl; trusted.gpg.d/ install path is documented in
+          # the README.
+          gpg --armor --export > public/apt/ccbridge.asc
+
+      - name: Write index page
+        run: |
+          cat > public/index.html <<'EOF'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>ccbridge apt repo</title>
+          <h1>ccbridge apt repo</h1>
+          <p>See <a href="https://github.com/mbocevski/ccbridge#install-debianubuntu">install instructions</a>.</p>
+          <ul>
+            <li><a href="apt/ccbridge.asc">Signing key</a></li>
+            <li><a href="apt/dists/stable/Release">Stable Release</a></li>
+            <li><a href="apt/dists/beta/Release">Beta Release</a></li>
+          </ul>
+          EOF
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: public
+          # Keep history short — apt repos accumulate metadata churn.
+          force_orphan: true

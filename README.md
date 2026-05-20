@@ -53,6 +53,45 @@ Re-running when already configured is safe: the settings file is left
 byte-for-byte unchanged when every hook is already registered, and the
 config is left untouched whenever it exists.
 
+## Install (Debian / Ubuntu)
+
+Pre-built `.deb` packages are published from CI to a signed apt repo
+hosted on GitHub Pages.  Two channels are available:
+
+- **stable** — published on every `v*` git tag.  Install this if you
+  just want it to work.
+- **beta** — published on every push to `main`.  Install this if you
+  want the latest fixes faster than tags ship.
+
+One-time setup (adds the signing key and the apt source):
+
+```sh
+# Trust the ccbridge release signing key.
+sudo curl -fsSLo /etc/apt/keyrings/ccbridge.asc \
+  https://mbocevski.github.io/ccbridge/apt/ccbridge.asc
+
+# Add the apt source.  Use `stable` or `beta` as the suite name.
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/ccbridge.asc] \
+  https://mbocevski.github.io/ccbridge/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/ccbridge.list
+
+sudo apt update
+sudo apt install ccbridge
+ccbridged setup
+```
+
+Per-user setup (`ccbridged setup`) is the same as on Arch — registers
+hooks in `~/.claude/settings.json`, writes `~/.config/ccbridge/config.toml`
+if absent, enables the `ccbridge.service` systemd user unit.
+
+To switch from stable to beta later: change `stable` to `beta` in
+`/etc/apt/sources.list.d/ccbridge.list`, run `sudo apt update`, and
+the next `apt install --only-upgrade ccbridge` picks up beta builds.
+
+To uninstall: `sudo apt remove ccbridge`.  Per-user state in
+`~/.claude/` and `~/.config/ccbridge/` is left in place (dpkg doesn't
+manage user data); remove it manually if you want a clean wipe.
+
 ## What you'll see
 
 When Claude Code is about to run a tool that needs approval, a critical
