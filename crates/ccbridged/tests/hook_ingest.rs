@@ -43,10 +43,60 @@ async fn setup(approval_timeout: Duration) -> (TempDir, ccbridged::state::Aggreg
     );
     hook_ingest::spawn(runtime_dir.clone(), agg_tx.clone());
 
-    // Give the accept loop a moment to bind.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Poll for the listener to accept connections — replaces a bind-sleep
+    // that races on busy CI.
+    wait_for_socket(&sock_path(&runtime_dir), Duration::from_secs(5)).await;
 
     (dir, agg_tx, runtime_dir)
+}
+
+/// Wait for a unix socket to be present and accepting connections.
+/// The accept loop binds the inode before it's ready, so existence
+/// alone isn't enough — actually probe with connect().
+async fn wait_for_socket(path: &Path, deadline: Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        if path.exists() {
+            if let Ok(s) = UnixStream::connect(path).await {
+                drop(s);
+                return;
+            }
+        }
+        if start.elapsed() >= deadline {
+            panic!(
+                "socket {} not accepting connections within {deadline:?}",
+                path.display(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Poll the aggregator's heartbeat until `pred(hb)` holds. Replaces fixed
+/// sleeps used to wait for "the aggregator must have processed the previous
+/// message by now" — racy on busy runners.
+async fn poll_heartbeat<F>(agg_tx: &ccbridged::state::AggregatorTx, deadline: Duration, pred: F)
+where
+    F: Fn(&ccbridge_proto::buddy::Heartbeat) -> bool,
+{
+    let start = std::time::Instant::now();
+    loop {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        agg_tx
+            .send(AggregatorMsg::GetHeartbeat { respond: tx })
+            .await
+            .unwrap();
+        let hb = rx.await.unwrap();
+        if pred(&hb) {
+            return;
+        }
+        if start.elapsed() >= deadline {
+            panic!(
+                "heartbeat predicate never satisfied within {deadline:?}; last: {hb:?}",
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 fn sock_path(runtime_dir: &Path) -> PathBuf {
@@ -166,8 +216,9 @@ async fn pre_tool_use_allow_decision() {
     });
     send_line(&mut writer, &pre_tool_use).await;
 
-    // Give the aggregator time to register the pending approval.
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Wait until the aggregator has registered the pending approval —
+    // sending the decision before that races and the decision is dropped.
+    poll_heartbeat(&agg_tx, Duration::from_secs(2), |hb| hb.waiting >= 1).await;
 
     // Send the permission decision from a parallel "emit module".
     agg_tx
@@ -213,7 +264,7 @@ async fn pre_tool_use_deny_decision() {
         "tool_use_id": "toolu_deny_001"
     });
     send_line(&mut writer, &pre_tool_use).await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    poll_heartbeat(&agg_tx, Duration::from_secs(2), |hb| hb.waiting >= 1).await;
 
     agg_tx
         .send(AggregatorMsg::PermissionDecision {
@@ -383,7 +434,7 @@ async fn wire_once_maps_to_allow() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    poll_heartbeat(&agg_tx, Duration::from_secs(2), |hb| hb.waiting >= 1).await;
     agg_tx
         .send(AggregatorMsg::PermissionDecision {
             tool_use_id: "toolu_map_001".to_owned(),
@@ -449,7 +500,7 @@ async fn pre_tool_use_hard_deny_via_allowlist() {
         al,
     );
     ccbridged::ingest::hooks::spawn(runtime_dir.clone(), agg_tx.clone());
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    wait_for_socket(&sock_path(&runtime_dir), Duration::from_secs(5)).await;
 
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 

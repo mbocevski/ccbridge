@@ -87,8 +87,12 @@ async fn setup_full(approval_timeout: Duration) -> FullSetup {
         PersistedTokens::default(),
     );
 
-    // Give all four accept loops a moment to bind.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Probe each socket until its listener is bound, instead of sleeping
+    // a fixed 50ms. The hook subprocess (used by some tests below) does
+    // not retry connect() — fail-silent on ENOENT — so an unprobed bind
+    // race would silently turn the hook into a passthrough.
+    wait_for_socket(&ccbridge_dir.join("hooks.sock"), Duration::from_secs(5)).await;
+    wait_for_socket(&ccbridge_dir.join("ctrl.sock"), Duration::from_secs(5)).await;
 
     FullSetup {
         _dir: dir,
@@ -117,6 +121,40 @@ async fn ctrl_connect(
         .expect("connect to ctrl.sock");
     let (r, w) = stream.into_split();
     (BufReader::new(r), w)
+}
+
+/// Poll for `path` to exist. Used after operations that complete via the
+/// aggregator task (e.g. AllowlistAlways → settings.local.json write).
+async fn wait_for_path(path: &Path, deadline: Duration) {
+    let start = std::time::Instant::now();
+    while !path.exists() {
+        if start.elapsed() >= deadline {
+            panic!("path {} did not appear within {deadline:?}", path.display());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Wait for a unix socket to be both present and accepting connections —
+/// poll connect() rather than just stat(). The accept loop binds the
+/// inode before it's ready to accept, so existence alone is not enough.
+async fn wait_for_socket(path: &Path, deadline: Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        if path.exists() {
+            if let Ok(s) = UnixStream::connect(path).await {
+                drop(s);
+                return;
+            }
+        }
+        if start.elapsed() >= deadline {
+            panic!(
+                "socket {} not accepting connections within {deadline:?}",
+                path.display(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 async fn read_json<T: serde::de::DeserializeOwned>(
@@ -287,8 +325,8 @@ async fn golden_path() {
     );
 
     // ── 6. Wait for tokens ≥ 200 ─────────────────────────────────────────────
-    // Give the JSONL watcher time to pick up the file (polls at 50ms).
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // wait_for_heartbeat already polls with a 5s deadline — no fixed sleep
+    // needed for the JSONL watcher pickup latency.
     let hb = wait_for_heartbeat(&mut ctrl_r, |hb| hb.tokens >= 200).await;
     assert!(
         hb.tokens >= 200,
@@ -552,16 +590,14 @@ async fn allowlist_always_writes_pattern_and_approves() {
     );
 
     // ── Assert settings.local.json created with derived pattern ───────────────
-    // Give the write a tick to complete (it happens synchronously in the agg task).
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The write happens on the aggregator task — fsync chain (G1) means
+    // it can land later than expected on slow disks. Poll for the file
+    // rather than guessing a fixed sleep budget.
     let local = project_dir
         .path()
         .join(".claude")
         .join("settings.local.json");
-    assert!(
-        local.exists(),
-        "AllowlistAlways must create settings.local.json"
-    );
+    wait_for_path(&local, Duration::from_secs(2)).await;
     let content = std::fs::read_to_string(&local).unwrap();
     let v: serde_json::Value = serde_json::from_str(&content).unwrap();
     let allow = v["permissions"]["allow"].as_array().unwrap();
