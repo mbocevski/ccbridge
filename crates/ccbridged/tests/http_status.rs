@@ -80,6 +80,26 @@ async fn unknown_path_returns_404() {
 }
 
 #[tokio::test]
+async fn non_loopback_addr_is_rejected() {
+    // Binding to 0.0.0.0 must be refused — heartbeat leaks cwd + session info.
+    let (agg_tx, _hb_rx) = spawn_aggregator(
+        DEFAULT_APPROVAL_TIMEOUT,
+        ccbridged::config::Fallback::default(),
+        Arc::new(arc_swap::ArcSwap::new(Arc::new(
+            ccbridged::permission::Allowlist::empty(),
+        ))),
+    );
+    let err = http_emit::spawn(agg_tx, "0.0.0.0:0".parse().unwrap())
+        .await
+        .expect_err("binding 0.0.0.0 must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("loopback"),
+        "error must mention loopback policy, got: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn post_status_returns_404() {
     // Only GET /status is handled; POST is not.
     let (_agg_tx, addr) = setup().await;

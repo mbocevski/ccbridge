@@ -123,6 +123,13 @@ Then add a custom module to `~/.config/waybar/config`:
 ctrl-socket heartbeat). Only `GET /status` is served; everything else returns
 404.
 
+**Loopback-only:** ccbridge refuses to bind the HTTP endpoint to any non-loopback
+address (`0.0.0.0`, LAN IPs, etc.). The heartbeat contains `cwd`, `session_id`,
+`agent_type`, and tool command hints that must not be exposed to the network.
+Only `127.0.0.1` (IPv4) and `::1` (IPv6) are accepted; a non-loopback `addr`
+in the config produces a warning and disables the endpoint without crashing the
+daemon.
+
 ## Configuration
 
 ccbridge reads `$XDG_CONFIG_HOME/ccbridge/config.toml`

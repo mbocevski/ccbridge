@@ -62,6 +62,18 @@ pub async fn spawn(
     agg_tx: AggregatorTx,
     addr: SocketAddr,
 ) -> anyhow::Result<(tokio::task::JoinHandle<()>, SocketAddr)> {
+    // Refuse non-loopback addresses.  The /status response contains cwd,
+    // session_id, agent_type, tool names, and command hints — it must never
+    // be exposed to LAN without authentication.
+    if !addr.ip().is_loopback() {
+        anyhow::bail!(
+            "http: refusing to bind {} — only loopback addresses are allowed \
+             (heartbeat contains cwd, session_id, agent_type; never expose to LAN). \
+             Use 127.0.0.1 or ::1.",
+            addr
+        );
+    }
+
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("http: bind {addr}"))?;
