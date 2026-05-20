@@ -11,18 +11,34 @@ A bidirectional control socket lets any script or TUI read live session
 state — token counts, running/waiting counts, current approval prompt — and
 send decisions back.
 
-**v1 scope:** Arch Linux only (install via PKGBUILD), freedesktop notifications
-and control socket. A BLE bridge to claude-desktop-buddy hardware is planned
-for v2 — the control socket already speaks the buddy wire protocol, so a BLE
-bridge can live as a separate process that connects to ctrl.sock.
+**v1 scope:** Arch Linux only, freedesktop notifications and control socket.
+A BLE bridge to claude-desktop-buddy hardware is planned for v2 — the
+control socket already speaks the buddy wire protocol, so a BLE bridge
+can live as a separate process that connects to ctrl.sock.
 
-## Install
+## Install (Arch Linux)
+
+ccbridge ships an in-repo `PKGBUILD` that builds a `ccbridge-git`
+package from the GitHub repository.  It is **not on the AUR yet** —
+a separate task tracks that submission.  Until then, install
+directly from the cloned repo:
 
 ```sh
-cd ~/dev/ccbridge
+git clone https://github.com/mbocevski/ccbridge.git
+cd ccbridge
 makepkg -si
 ccbridged setup
 ```
+
+`makepkg -si` builds the package, prompts for the sudo password,
+installs it system-wide, and enables ccbridge to be available as
+`/usr/bin/ccbridged` and `/usr/bin/ccbridge-hook`.  It also drops
+the `ccbridge.service` systemd user unit at
+`/usr/lib/systemd/user/ccbridge.service`.
+
+To upgrade later, pull the new commits and re-run `makepkg -si` —
+the dynamic `pkgver()` function in the PKGBUILD picks up the new
+version from `git describe`, so pacman recognises the upgrade.
 
 `ccbridged setup` is a one-shot, idempotent step that:
 

@@ -1,9 +1,15 @@
 # Maintainer: Marko Bocevski <marko.bocevski@gmail.com>
 #
-# Local PKGBUILD: builds from the working tree at $HOME/dev/ccbridge.
-# NOT AUR-publishable as-is — the source URL must point at a public Git
-# remote (e.g. https://github.com/...) before submission. A separate
-# task tracks publishing the AUR version.
+# Build a ccbridge-git package directly from the GitHub repo:
+#
+#     git clone https://github.com/mbocevski/ccbridge.git
+#     cd ccbridge
+#     makepkg -si
+#     ccbridged setup
+#
+# Not yet on the AUR — a separate backlog task tracks AUR submission.
+# The PKGBUILD lives in-repo so contributors and early adopters can
+# install via the standard makepkg flow without waiting for AUR.
 pkgname=ccbridge-git
 # pkgver is computed dynamically by pkgver(); this static value is a placeholder.
 pkgver=0
@@ -17,7 +23,7 @@ makedepends=('cargo' 'git')
 provides=('ccbridge')
 conflicts=('ccbridge')
 install=ccbridge.install
-source=("ccbridge::git+file://$HOME/dev/ccbridge")
+source=("ccbridge::git+https://github.com/mbocevski/ccbridge.git")
 sha256sums=('SKIP')
 
 pkgver() {
