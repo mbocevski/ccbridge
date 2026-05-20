@@ -134,15 +134,15 @@ pub enum AggregatorMsg {
     /// Idle-gate timer for a `Stop` event has elapsed.  Sent by a task
     /// spawned from the `Stop` handler after `idle_grace_ms`.
     ///
-    /// The aggregator checks `prompt_serial` against the session's current
-    /// `last_user_prompt_serial`: if they still match, the user genuinely
-    /// walked away (no new prompt arrived during the grace window) and the
-    /// `TurnDoneEvent` is broadcast.  If a `UserPromptSubmit` happened in
-    /// the meantime, the serials diverge and we skip — the user is still
-    /// at the keyboard.
+    /// The aggregator checks `activity_serial` against the session's
+    /// current `last_activity_serial`: if they still match, nothing has
+    /// happened on this session during the grace window — Claude is
+    /// genuinely done — and the `TurnDoneEvent` is broadcast.  If any
+    /// activity bumped the counter (new user prompt, a tool call mid-task,
+    /// etc.), the serials diverge and we skip the notification.
     CheckTurnDone {
         session_id: SessionId,
-        prompt_serial: u64,
+        activity_serial: u64,
         snapshot: TurnDoneSnapshot,
     },
 }
@@ -262,13 +262,17 @@ pub struct Session {
     ///
     /// Used as the lookup key into `Aggregator.pending` for heartbeat display.
     pub pending_tool_use_id: Option<ToolUseId>,
-    /// Monotonic counter, bumped on every `UserPromptSubmit` for this session.
+    /// Monotonic counter, bumped on every hook event that means
+    /// "this session is still doing something" — `UserPromptSubmit`,
+    /// `PreToolUse`, `PostToolUse`, `SessionStart`.
     ///
-    /// Used by the turn-done idle gate: when a `Stop` fires, we capture the
-    /// current value, sleep `idle_grace_ms`, then re-check.  If the counter
-    /// has advanced, the user submitted a new prompt mid-grace and we skip
-    /// the "Claude is done" notification.
-    pub last_user_prompt_serial: u64,
+    /// Used by the turn-done idle gate: when a `Stop` fires, we capture
+    /// the current value, sleep `idle_grace_ms`, then re-check.  If the
+    /// counter has advanced — meaning the user submitted a new prompt OR
+    /// Claude continued to a tool call mid-task — we skip the
+    /// "Claude is done" notification.  Stop itself does NOT bump (a Stop
+    /// is exactly the moment we want to start the idle clock from).
+    pub last_activity_serial: u64,
 }
 
 impl Session {
@@ -279,7 +283,7 @@ impl Session {
             running: false,
             waiting: false,
             pending_tool_use_id: None,
-            last_user_prompt_serial: 0,
+            last_activity_serial: 0,
         }
     }
 
@@ -287,6 +291,12 @@ impl Session {
     fn clear_pending(&mut self) {
         self.waiting = false;
         self.pending_tool_use_id = None;
+    }
+
+    /// Bump the activity serial.  Called from every handler that means
+    /// "this session is still doing something" — see field doc.
+    fn bump_activity(&mut self) {
+        self.last_activity_serial = self.last_activity_serial.saturating_add(1);
     }
 }
 
@@ -545,9 +555,11 @@ impl Aggregator {
         match event {
             HookEvent::SessionStart(e) => {
                 info!(session_id = %e.base.session_id, cwd = %e.base.cwd, "session started");
-                self.sessions
+                let session = self
+                    .sessions
                     .entry(e.base.session_id.clone())
                     .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd));
+                session.bump_activity();
                 self.push_entry(format!("session: {}", e.base.cwd));
                 self.broadcast_heartbeat();
                 let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
@@ -563,6 +575,14 @@ impl Aggregator {
 
             HookEvent::PreToolUse(e) => {
                 use crate::permission::{self, Decision};
+
+                // Bump activity so any pending turn-done idle gate for this
+                // session sees that Claude is still actively driving tools
+                // and suppresses the "Claude is done" notification.
+                self.sessions
+                    .entry(e.base.session_id.clone())
+                    .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd))
+                    .bump_activity();
 
                 // Cascade project-local + project + user allowlists for this cwd.
                 let cascade = self
@@ -611,6 +631,9 @@ impl Aggregator {
                 if let Some(s) = self.sessions.get_mut(&e.base.session_id) {
                     s.running = false;
                     s.clear_pending();
+                    // Tool just ran — Claude is still working, idle gate
+                    // for any preceding Stop should be invalidated.
+                    s.bump_activity();
                 }
                 self.push_entry(format!(
                     "{}: {}",
@@ -654,11 +677,10 @@ impl Aggregator {
                     .entry(e.base.session_id.clone())
                     .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd));
                 session.running = true;
-                // Bump the serial so any pending CheckTurnDone tasks for
-                // this session see the user is still active and skip the
-                // notification.
-                session.last_user_prompt_serial =
-                    session.last_user_prompt_serial.saturating_add(1);
+                // Bump the activity serial so any pending CheckTurnDone task
+                // for this session sees the user is back at the keyboard
+                // and skips the "Claude is done" notification.
+                session.bump_activity();
                 self.broadcast_heartbeat();
                 let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
@@ -840,10 +862,10 @@ impl Aggregator {
             return;
         };
         let session_id = e.base.session_id.clone();
-        let prompt_serial = self
+        let activity_serial = self
             .sessions
             .get(&session_id)
-            .map(|s| s.last_user_prompt_serial)
+            .map(|s| s.last_activity_serial)
             .unwrap_or(0);
         let snapshot = TurnDoneSnapshot {
             response_snippet: e
@@ -862,7 +884,7 @@ impl Aggregator {
             let _ = tx
                 .send(AggregatorMsg::CheckTurnDone {
                     session_id,
-                    prompt_serial,
+                    activity_serial,
                     snapshot,
                 })
                 .await;
@@ -870,22 +892,22 @@ impl Aggregator {
     }
 
     /// Idle-gate handler.  Fires `TurnDoneEvent` if the session's
-    /// `last_user_prompt_serial` hasn't advanced since the Stop captured it.
+    /// `last_activity_serial` hasn't advanced since the Stop captured it.
     fn handle_check_turn_done(
         &self,
         session_id: SessionId,
-        prompt_serial: u64,
+        activity_serial: u64,
         snapshot: TurnDoneSnapshot,
     ) {
         let current = self
             .sessions
             .get(&session_id)
-            .map(|s| s.last_user_prompt_serial)
-            .unwrap_or(prompt_serial); // session gone → treat as still idle
-        if current != prompt_serial {
+            .map(|s| s.last_activity_serial)
+            .unwrap_or(activity_serial); // session gone → treat as still idle
+        if current != activity_serial {
             debug!(
                 %session_id,
-                "turn-done: user submitted a new prompt during idle grace — skipping notification",
+                "turn-done: session activity advanced during idle grace — skipping notification",
             );
             return;
         }
@@ -968,8 +990,8 @@ impl Aggregator {
                         Some(AggregatorMsg::AllowlistAlways { tool_use_id }) => {
                             self.handle_allowlist_always(tool_use_id);
                         }
-                        Some(AggregatorMsg::CheckTurnDone { session_id, prompt_serial, snapshot }) => {
-                            self.handle_check_turn_done(session_id, prompt_serial, snapshot);
+                        Some(AggregatorMsg::CheckTurnDone { session_id, activity_serial, snapshot }) => {
+                            self.handle_check_turn_done(session_id, activity_serial, snapshot);
                         }
                     }
                 }
@@ -1123,7 +1145,6 @@ mod tests {
         })
     }
 
-    #[allow(dead_code)] // available for future tests that exercise PostToolUse handling
     fn post_tool_use_event(session_id: &str, tool_use_id: &str, tool: &str) -> HookEvent {
         HookEvent::PostToolUse(PostToolUseEvent {
             base: base(session_id),
@@ -2060,6 +2081,87 @@ mod tests {
         assert!(
             result.is_err(),
             "turn-done must NOT fire when user submitted a follow-up; got {:?}",
+            result,
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_done_skipped_if_pre_tool_use_arrives_in_grace() {
+        // Claude finishes a "turn" mid-task — Stop fires — then immediately
+        // resumes with another tool call. The idle gate must NOT misfire as
+        // "Claude is done" because Claude is clearly still working.
+        let (tx, _hb_rx, mut td_rx) = spawn_with_turn_done(Duration::from_millis(200));
+
+        let (r0, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(session_start_event("sess_midtask")),
+            respond: r0,
+        })
+        .await
+        .unwrap();
+        let (r1, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(stop_event("sess_midtask")),
+            respond: r1,
+        })
+        .await
+        .unwrap();
+
+        // Claude resumes with a tool call before grace expires.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (r2, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(pre_tool_use_event("sess_midtask", "toolu_mid", "Bash")),
+            respond: r2,
+        })
+        .await
+        .unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "turn-done must NOT fire when Claude continued with a tool call; got {:?}",
+            result,
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_done_skipped_if_post_tool_use_arrives_in_grace() {
+        // Same shape as the PreToolUse test but for PostToolUse — covers
+        // the case where the Stop arrived between PreToolUse (allowed
+        // immediately by the allowlist) and PostToolUse.
+        let (tx, _hb_rx, mut td_rx) = spawn_with_turn_done(Duration::from_millis(200));
+
+        let (r0, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(session_start_event("sess_post")),
+            respond: r0,
+        })
+        .await
+        .unwrap();
+        let (r1, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(stop_event("sess_post")),
+            respond: r1,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (r2, _) = oneshot::channel();
+        tx.send(AggregatorMsg::HookEvent {
+            event: Box::new(post_tool_use_event("sess_post", "toolu_p", "Bash")),
+            respond: r2,
+        })
+        .await
+        .unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "turn-done must NOT fire when a PostToolUse arrives during grace; got {:?}",
             result,
         );
     }
