@@ -17,13 +17,9 @@ permissions:
   contents: read
 
 env:
-  # Surface compiler warnings as errors workspace-wide so a regression
-  # in lint hygiene fails the build instead of being merged silently.
+  # Warnings → errors so lint regressions don't merge silently.
   RUSTFLAGS: "-D warnings"
   CARGO_TERM_COLOR: always
-  # Disable incremental — slower locally, but on CI the fresh-build path
-  # is the common case and incremental adds disk + cache overhead with
-  # no benefit (caches are restored, not appended-to).
   CARGO_INCREMENTAL: "0"
 
 jobs:
@@ -60,7 +56,6 @@ jobs:
         with:
           shared-key: stable-build
       - run: cargo build --workspace --all-features --tests --locked
-      # `--locked` above; tests don't need it (already built).
       - run: cargo test --workspace --all-features
 
   doc:
@@ -74,6 +69,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: stable-build
-          # `cargo doc` writes to a separate `doc/` subtree so it doesn't
-          # invalidate the build artefacts the test job needs.
       - run: cargo doc --workspace --no-deps --all-features

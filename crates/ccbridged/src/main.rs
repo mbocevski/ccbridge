@@ -18,10 +18,9 @@
 //!
 //! # Feature flags
 //!
-//! * `ble` (default) — placeholder for the future BLE bridge.  Machines
-//!   without a BLE controller, or maintainers who don't want to compile
-//!   BLE code, can pass `--no-default-features` to skip it.  All other
-//!   emit paths compile unconditionally.
+//! * `ble` (default) — BLE bridge support.  Pass
+//!   `--no-default-features` to skip BLE compilation.  All other emit
+//!   paths compile unconditionally.
 
 use std::sync::Arc;
 

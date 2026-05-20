@@ -33,8 +33,6 @@ use serde_json::{json, Value};
 /// All hook event names ccbridge registers.
 ///
 /// This is the complete list of event variants in `ccbridge_proto::hook::HookEvent`.
-/// Registering all of them now means future ccbridge features that use
-/// `UserPromptSubmit` or `SessionEnd` work without re-running setup.
 pub const HOOK_EVENTS: &[&str] = &[
     "PreToolUse",
     "PostToolUse",

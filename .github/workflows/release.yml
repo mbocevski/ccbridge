@@ -5,12 +5,7 @@ name: release
 #   Stable: triggered by pushing a `v*` tag.  The .deb files attach to a
 #           GitHub Release and the apt repo's `stable` suite is updated.
 #   Beta:   triggered by every push to `main`.  No GitHub Release; the
-#           apt repo's `beta` suite gets a fresh .deb so adventurous
-#           users can `apt install -t beta` to track the bleeding edge.
-#
-# All artefacts are built on Ubuntu 24.04 LTS hosted runners (x86_64 +
-# arm64).  GitHub provides arm64 hosted runners on the free tier as
-# of late 2024 — no self-hosted infra needed.
+#           apt repo's `beta` suite gets a fresh .deb.
 
 on:
   push:
@@ -79,8 +74,6 @@ jobs:
           shared-key: release-${{ matrix.arch }}
 
       - name: Install cargo-deb
-        # `cargo binstall` is faster than building from source, but adds
-        # another action; sticking with `cargo install` for transparency.
         run: cargo install cargo-deb --locked --version "^2.0"
 
       - name: Build release binaries

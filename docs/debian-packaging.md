@@ -107,14 +107,3 @@ workflow with `workflow_dispatch` to repopulate.
 `[arch=arm64]` in their sources.list line.  The README snippet uses
 `$(dpkg --print-architecture)` which auto-detects.
 
-## Out of scope for now
-
-- **Multi-distribution suites.** We publish one `stable` and one
-  `beta` suite; we do NOT publish per-Ubuntu-version (`jammy`,
-  `noble`, etc.) suites.  ccbridge only depends on `$auto` resolved
-  libc, which is stable across all current LTS releases.  Revisit if
-  we ever pick up a libfoo dependency that varies per release.
-
-- **i386 / 32-bit ARM.** Excluded from the matrix — modern Linux
-  desktops are amd64 or aarch64, and the runner cost of cross-
-  compiling for niche arches isn't worth it for a developer tool.

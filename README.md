@@ -10,18 +10,10 @@ without switching windows. A bidirectional control socket lets any script
 or TUI read live session state — token counts, running/waiting counts,
 current approval prompts — and send decisions back.
 
-**v1 scope:** Arch Linux only, freedesktop notifications and control socket.
-A BLE hardware bridge is planned for v2 — the control socket is the
-documented integration point, so any out-of-process bridge can live
-alongside the daemon and translate ctrl-protocol bytes onto whatever
-transport it needs.
-
 ## Install (Arch Linux)
 
 ccbridge ships an in-repo `PKGBUILD` that builds a `ccbridge-git`
-package from the GitHub repository.  It is **not on the AUR yet** —
-a separate task tracks that submission.  Until then, install
-directly from the cloned repo:
+package from the GitHub repository:
 
 ```sh
 git clone https://github.com/mbocevski/ccbridge.git

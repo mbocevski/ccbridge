@@ -17,10 +17,9 @@ path = "src/main.rs"
 
 # Feature flags
 # -------------
-# ble — placeholder for the v2 BLE bridge.  Enabled by default; machines
-#       without a BLE controller (or maintainers who don't want to compile
-#       BLE code) pass --no-default-features.  All other emit paths
-#       (notify, ctrl, http) are always-on and do not require a feature flag.
+# ble — BLE bridge support.  Enabled by default; pass --no-default-features
+#       to skip BLE compilation (no controller, headless install, etc.).
+#       All other emit paths (notify, ctrl, http) are always on.
 [features]
 default = ["ble"]
 ble = []
