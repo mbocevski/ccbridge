@@ -74,8 +74,17 @@ fn do_setup() -> Result<()> {
 
     let results = merge_hooks(&mut settings)
         .with_context(|| format!("merging hooks into {}", settings_path.display()))?;
-    save_settings(&settings_path, &settings)
-        .with_context(|| format!("writing {}", settings_path.display()))?;
+
+    // Only write the file back if merge_hooks actually changed something.
+    // A no-op write would re-pretty-print the JSON, alphabetise keys
+    // (serde_json's default Map ordering), and lose any custom formatting
+    // the user had — all without changing the semantic content.  Idempotent
+    // re-runs should leave the file's bytes untouched.
+    let any_added = results.iter().any(|r| r.action == HookAction::Added);
+    if any_added {
+        save_settings(&settings_path, &settings)
+            .with_context(|| format!("writing {}", settings_path.display()))?;
+    }
 
     // --- 2. Write default config (only if absent) ---
     let config_outcome = write_default_config_if_absent()
@@ -590,6 +599,54 @@ mod tests {
                 "duplicate groups for {event}"
             );
         }
+    }
+
+    #[test]
+    fn idempotent_setup_does_not_rewrite_settings_file() {
+        // Pin the bug fix: when every hook is AlreadyPresent, do_setup
+        // must not call save_settings — otherwise it would re-pretty-print
+        // the JSON, alphabetise keys, and trash any user formatting.
+        // We mirror the `do_setup` flow with a tempdir-scoped settings
+        // file and a hand-crafted bytes-on-disk we want to see preserved.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // User-authored layout: keys in a specific order, two-space indent,
+        // unrelated `theme` key first.  All HOOK_EVENTS already have a
+        // ccbridge-hook entry.
+        let user_authored = format!(
+            "{{\n  \"theme\": \"dark\",\n  \"hooks\": {{\n{}  }}\n}}\n",
+            HOOK_EVENTS
+                .iter()
+                .map(|e| format!(
+                    "    \"{e}\": [{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{HOOK_COMMAND}\"}}]}}],\n"
+                ))
+                .collect::<String>()
+                .trim_end_matches(",\n")
+                .to_owned(),
+        );
+        std::fs::write(&path, &user_authored).unwrap();
+
+        // Run the setup-flow decision logic.
+        let mut settings = load_settings(&path).unwrap();
+        let results = merge_hooks(&mut settings).unwrap();
+        let any_added = results.iter().any(|r| r.action == HookAction::Added);
+        assert!(
+            !any_added,
+            "all hooks are pre-registered — none should be Added",
+        );
+        if any_added {
+            save_settings(&path, &settings).unwrap();
+        }
+
+        // Bytes on disk must be byte-for-byte identical.  This is the
+        // load-bearing assertion: the absence of a save_settings() call
+        // means the user's formatting survives a no-op `ccbridged setup`.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            on_disk, user_authored,
+            "no-op setup must NOT rewrite settings.json",
+        );
     }
 
     #[test]
