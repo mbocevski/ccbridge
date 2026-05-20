@@ -552,20 +552,55 @@ async fn handle_turn_done(
     session_notif: &mut HashMap<String, u32>,
     expire_ms: i32,
 ) {
-    let cwd_basename = std::path::Path::new(&evt.cwd)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&evt.cwd);
-
-    let summary = "Claude is done";
-    let body = if evt.response_snippet.is_empty() {
-        format!("{}  ·  {} tokens", cwd_basename, evt.tokens_cumulative)
+    // Match the approval-prompt summary/body format so the visual surface
+    // is consistent: "Claude Code [~/dev/x]: done" and a context line
+    // "[~/dev/x · main · 3cb589]" mirroring the approval notification.
+    let cwd_short = if evt.cwd.is_empty() {
+        None
     } else {
-        format!(
-            "{}\n{}  ·  {} tokens",
-            evt.response_snippet, cwd_basename, evt.tokens_cumulative,
-        )
+        let s = shorten_cwd(&evt.cwd);
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     };
+    let session_short = if evt.session_id.is_empty() {
+        None
+    } else {
+        Some(crate::util::short_session_id(&evt.session_id))
+    };
+
+    let summary = match cwd_short.as_deref() {
+        Some(c) => format!("Claude Code [{}]: done", c),
+        None => "Claude Code: done".to_owned(),
+    };
+
+    // Body: response snippet (when present), then the same
+    // "[cwd · agent_or_main · session]" context line as approvals, then
+    // the cumulative token count.  TurnDoneEvent doesn't carry
+    // agent_type — Stop is a session-level event, not per-tool-call —
+    // so we always write "main" here.
+    let mut body = String::new();
+    if !evt.response_snippet.is_empty() {
+        body.push_str(&evt.response_snippet);
+    }
+
+    if cwd_short.is_some() || session_short.is_some() {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&format!(
+            "[{} · main · {}]",
+            cwd_short.as_deref().unwrap_or("?"),
+            session_short.as_deref().unwrap_or("?"),
+        ));
+    }
+
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    body.push_str(&format!("{} tokens", evt.tokens_cumulative));
 
     let mut hints = HashMap::new();
     hints.insert(
@@ -585,7 +620,7 @@ async fn handle_turn_done(
             "ccbridge",
             replaces_id,
             "",
-            summary,
+            &summary,
             &body,
             &[], // no actions
             &hints,
