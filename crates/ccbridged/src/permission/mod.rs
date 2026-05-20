@@ -141,64 +141,76 @@ async fn run_settings_watcher(
         .ok_or_else(|| anyhow::anyhow!("settings_path has no parent"))?
         .to_path_buf();
 
-    let (ev_tx, ev_rx) = std_mpsc::channel::<notify::Result<Event>>();
-    let mut watcher = RecommendedWatcher::new(ev_tx, Config::default())
+    // Bridge notify's sync std::mpsc to a tokio mpsc so we can `await`
+    // events instead of busy-polling try_recv.  A small forwarder thread
+    // pulls from the sync channel and pushes into the async channel.
+    let (sync_tx, sync_rx) = std_mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = RecommendedWatcher::new(sync_tx, Config::default())
         .map_err(|e| anyhow::anyhow!("create watcher: {e}"))?;
     watcher
         .watch(&watch_dir, RecursiveMode::NonRecursive)
         .map_err(|e| anyhow::anyhow!("watch {}: {e}", watch_dir.display()))?;
+
+    let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        // Drains the sync channel until it closes.  Stops if the async
+        // receiver has been dropped (forwarder send error → exit cleanly).
+        while let Ok(event) = sync_rx.recv() {
+            if async_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
 
     tracing::info!(
         path = %settings_path.display(),
         "settings watcher started",
     );
 
-    loop {
-        // Drain all pending notify events.
-        loop {
-            match ev_rx.try_recv() {
-                Ok(Ok(event)) => {
-                    use notify::EventKind;
-                    let relevant =
-                        matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
-                    if !relevant {
-                        continue;
-                    }
-                    // Filter to the specific settings.json path.
-                    let touches_settings = event.paths.iter().any(|p| p == &settings_path);
-                    if !touches_settings {
-                        continue;
-                    }
-                    // Re-parse and swap.
-                    match Allowlist::from_path(&settings_path) {
-                        Ok(new) => {
-                            tracing::info!(
-                                allow_patterns = new.allow.len(),
-                                deny_patterns = new.deny.len(),
-                                "settings.json changed — reloaded allowlist",
-                            );
-                            allowlist.store(Arc::new(new));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "settings.json changed but is invalid ({e:#}) — \
-                                 keeping previous allowlist",
-                            );
-                        }
-                    }
+    // The watcher owns a sync sender that the forwarder thread receives
+    // from.  Hold it alive via this binding for the whole loop — dropping
+    // it would close the channel and wedge the watcher.
+    let _watcher_keep = watcher;
+
+    while let Some(event_result) = async_rx.recv().await {
+        match event_result {
+            Ok(event) => {
+                use notify::EventKind;
+                let relevant = matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
+                if !relevant {
+                    continue;
                 }
-                Ok(Err(e)) => {
-                    tracing::warn!("settings watcher notify error: {e}");
+                // Filter to the specific settings.json path.
+                let touches_settings = event.paths.iter().any(|p| p == &settings_path);
+                if !touches_settings {
+                    continue;
                 }
-                Err(std_mpsc::TryRecvError::Empty) => break,
-                Err(std_mpsc::TryRecvError::Disconnected) => {
-                    tracing::debug!("settings watcher channel closed — exiting");
-                    return Ok(());
+                // Re-parse and swap.
+                match Allowlist::from_path(&settings_path) {
+                    Ok(new) => {
+                        tracing::info!(
+                            allow_patterns = new.allow.len(),
+                            deny_patterns = new.deny.len(),
+                            "settings.json changed — reloaded allowlist",
+                        );
+                        allowlist.store(Arc::new(new));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "settings.json changed but is invalid ({e:#}) — \
+                             keeping previous allowlist",
+                        );
+                    }
                 }
             }
+            Err(e) => {
+                tracing::warn!("settings watcher notify error: {e}");
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+
+    tracing::debug!("settings watcher channel closed — exiting");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -457,69 +457,79 @@ async fn run_watcher(
     let mut offsets = FileOffsets::new();
     offsets.snapshot_existing(&projects_dir);
 
-    // Create a synchronous notify channel (notify 6 is sync).
-    let (ev_tx, ev_rx) = std_mpsc::channel::<notify::Result<Event>>();
+    // notify 6 only delivers events on a synchronous std::mpsc.  Bridge
+    // it to a tokio mpsc via a small forwarder thread so the main loop
+    // can `await` events instead of polling with a 50ms sleep — that
+    // wakes the runtime ~20×/s on every machine, idle or not.
+    let (sync_tx, sync_rx) = std_mpsc::channel::<notify::Result<Event>>();
     let mut watcher =
-        RecommendedWatcher::new(ev_tx, Config::default()).context("create filesystem watcher")?;
+        RecommendedWatcher::new(sync_tx, Config::default()).context("create filesystem watcher")?;
     watcher
         .watch(&projects_dir, RecursiveMode::Recursive)
         .context("watch projects dir")?;
+
+    let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        while let Ok(event) = sync_rx.recv() {
+            if async_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
 
     tracing::info!(dir = %projects_dir.display(), "JSONL watcher started");
 
     // Debounce timer: tokens changed since last persist?
     let mut tokens_dirty = false;
-    let mut last_persist = std::time::Instant::now();
 
-    // Run the event loop inside a blocking task (notify 6 uses a sync channel).
-    // We poll the channel with a short timeout so we can also drive the persist
-    // debounce without blocking the tokio runtime.
+    // Persist debounce ticker: fires every PERSIST_DEBOUNCE.  Combined
+    // with the event channel via select! so persist happens promptly
+    // after a quiet period, not "up to PERSIST_DEBOUNCE + 50ms after".
+    let mut persist_tick = tokio::time::interval(PERSIST_DEBOUNCE);
+    persist_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    persist_tick.tick().await; // consume the immediate tick
+
+    // Hold the watcher alive for the duration of this loop — dropping
+    // it would close the sync channel and wedge the forwarder thread.
+    let _watcher_keep = watcher;
+
     loop {
-        // Drain all pending events (non-blocking after the first).
-        loop {
-            match ev_rx.try_recv() {
-                Ok(Ok(event)) => {
-                    handle_event(
-                        event,
-                        &mut offsets,
-                        &agg_tx,
-                        &mut cumulative,
-                        &mut today,
-                        &mut tokens_dirty,
-                    )
-                    .await;
-                }
-                Ok(Err(e)) => {
-                    warn!("JSONL watcher error: {e}");
-                }
-                Err(std_mpsc::TryRecvError::Empty) => break,
-                Err(std_mpsc::TryRecvError::Disconnected) => {
+        tokio::select! {
+            event_result = async_rx.recv() => {
+                let Some(event_result) = event_result else {
                     warn!("JSONL watcher channel disconnected");
                     return Ok(());
+                };
+                match event_result {
+                    Ok(event) => {
+                        handle_event(
+                            event,
+                            &mut offsets,
+                            &agg_tx,
+                            &mut cumulative,
+                            &mut today,
+                            &mut tokens_dirty,
+                        )
+                        .await;
+                    }
+                    Err(e) => warn!("JSONL watcher error: {e}"),
+                }
+            }
+            _ = persist_tick.tick() => {
+                if tokens_dirty {
+                    let snap = PersistedTokens {
+                        date: current_date.clone(),
+                        cumulative,
+                        today,
+                    };
+                    if let Err(e) = snap.save(&state_path) {
+                        warn!("JSONL watcher: failed to persist tokens: {e:#}");
+                    } else {
+                        tokens_dirty = false;
+                    }
                 }
             }
         }
-
-        // Persist debounce: flush every PERSIST_DEBOUNCE if tokens changed.
-        // Use `current_date` (set at startup from initial_tokens.date or today's
-        // UTC date) rather than recomputing — keeps the day boundary stable until
-        // the midnight-reset task fires DailyReset.
-        if tokens_dirty && last_persist.elapsed() >= PERSIST_DEBOUNCE {
-            let snap = PersistedTokens {
-                date: current_date.clone(),
-                cumulative,
-                today,
-            };
-            if let Err(e) = snap.save(&state_path) {
-                warn!("JSONL watcher: failed to persist tokens: {e:#}");
-            } else {
-                tokens_dirty = false;
-                last_persist = std::time::Instant::now();
-            }
-        }
-
-        // Yield to the tokio runtime before polling again.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
