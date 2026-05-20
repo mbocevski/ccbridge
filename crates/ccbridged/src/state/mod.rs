@@ -171,10 +171,14 @@ pub enum AggregatorMsg {
     },
 }
 
-/// Frozen-at-Stop data that travels with `CheckTurnDone` and is the payload
-/// of the eventual broadcast `TurnDoneEvent`. Captured at Stop time because
-/// `tokens.cumulative` and the session's `cwd`/`response` could change in
-/// the grace window.
+/// Stop-event-derived data that travels with `CheckTurnDone`.
+///
+/// Only fields whose value comes from the `Stop` event itself live here
+/// (`response_snippet`, `cwd`).  Token counts are deliberately NOT
+/// captured at Stop time and instead read live in `handle_check_turn_done`
+/// — the JSONL → TokensUpdate path is asynchronous and assistant lines
+/// from the just-finished turn typically arrive AFTER Stop, so a frozen
+/// snapshot would show 0 / stale values.
 #[derive(Debug, Clone)]
 pub struct TurnDoneSnapshot {
     /// Last assistant response, truncated to ~80 chars.  May be empty when
@@ -182,12 +186,6 @@ pub struct TurnDoneSnapshot {
     pub response_snippet: String,
     /// Working directory of the session (basename presented in the notif).
     pub cwd: String,
-    /// Cumulative token count at Stop time.
-    pub tokens_cumulative: u64,
-    /// Output tokens for the current user task (since the last
-    /// `UserPromptSubmit` for this session).  Surfaced in the
-    /// turn-done notification body as e.g. `"1.2k turn"`.
-    pub tokens_this_turn: u64,
 }
 
 /// Outcome of an `AggregatorMsg::PermissionDecision`, returned through
@@ -904,9 +902,11 @@ impl Aggregator {
             return;
         };
         let session_id = e.base.session_id.clone();
-        let session = self.sessions.get(&session_id);
-        let activity_serial = session.map(|s| s.last_activity_serial).unwrap_or(0);
-        let tokens_this_turn = session.map(|s| s.tokens_this_turn).unwrap_or(0);
+        let activity_serial = self
+            .sessions
+            .get(&session_id)
+            .map(|s| s.last_activity_serial)
+            .unwrap_or(0);
         let snapshot = TurnDoneSnapshot {
             response_snippet: e
                 .response
@@ -914,8 +914,6 @@ impl Aggregator {
                 .map(truncate_snippet)
                 .unwrap_or_default(),
             cwd: e.base.cwd.clone(),
-            tokens_cumulative: self.tokens.cumulative,
-            tokens_this_turn,
         };
         let grace = self.turn_done_idle_grace;
         tokio::spawn(async move {
@@ -952,13 +950,24 @@ impl Aggregator {
             );
             return;
         }
+        // Read tokens live (NOT from the snapshot): the JSONL → TokensUpdate
+        // path is asynchronous and the assistant lines from the just-
+        // finished turn typically land AFTER Stop fires.  By the time the
+        // idle gate has slept its grace window, the per-session counter
+        // reflects everything that turn produced.
+        let tokens_this_turn = self
+            .sessions
+            .get(&session_id)
+            .map(|s| s.tokens_this_turn)
+            .unwrap_or(0);
+        let tokens_cumulative = self.tokens.cumulative;
         // Best-effort broadcast; no subscribers is fine.
         let _ = self.turn_done_tx.send(TurnDoneEvent {
             session_id,
             response_snippet: snapshot.response_snippet,
             cwd: snapshot.cwd,
-            tokens_cumulative: snapshot.tokens_cumulative,
-            tokens_this_turn: snapshot.tokens_this_turn,
+            tokens_cumulative,
+            tokens_this_turn,
         });
     }
 
@@ -2271,6 +2280,58 @@ mod tests {
         assert_eq!(evt2.tokens_this_turn, 800, "must reset on UserPromptSubmit");
         // Global cumulative keeps growing across turns.
         assert_eq!(evt2.tokens_cumulative, 2_300);
+    }
+
+    #[tokio::test]
+    async fn turn_done_reads_tokens_live_when_jsonl_arrives_after_stop() {
+        // Regression: in production the JSONL TokensUpdate path is
+        // asynchronous; assistant lines from the just-finished turn
+        // typically arrive AFTER the Stop hook.  An earlier impl
+        // froze tokens_this_turn into the TurnDoneSnapshot at Stop
+        // time, so the notification always showed 0.  Now the
+        // CheckTurnDone handler reads live state instead — by the
+        // time the idle grace expires the JSONL has caught up.
+        //
+        // Use a longer grace (200 ms) so the test has room to
+        // simulate the JSONL arriving mid-grace.
+        let (tx, _hb_rx, mut td_rx) = spawn_with_turn_done(Duration::from_millis(200));
+
+        let send_event = |evt: HookEvent| {
+            let tx = tx.clone();
+            async move {
+                let (r, _) = oneshot::channel();
+                tx.send(AggregatorMsg::HookEvent {
+                    event: Box::new(evt),
+                    respond: r,
+                })
+                .await
+                .unwrap();
+            }
+        };
+
+        send_event(session_start_event("sess_race")).await;
+        send_event(user_prompt_event("sess_race")).await;
+        // Stop arrives BEFORE any tokens have been observed for this turn.
+        // Pre-fix this would freeze tokens_this_turn=0 in the snapshot.
+        send_event(stop_event("sess_race")).await;
+
+        // JSONL catches up mid-grace.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        tx.send(AggregatorMsg::TokensUpdate {
+            output_tokens: 1_172,
+            session_id: Some("sess_race".to_owned()),
+        })
+        .await
+        .unwrap();
+
+        let evt = tokio::time::timeout(Duration::from_secs(2), td_rx.recv())
+            .await
+            .expect("turn-done must fire")
+            .expect("broadcast open");
+        assert_eq!(
+            evt.tokens_this_turn, 1_172,
+            "must reflect tokens that arrived AFTER Stop but before grace expiry",
+        );
     }
 
     #[tokio::test]
