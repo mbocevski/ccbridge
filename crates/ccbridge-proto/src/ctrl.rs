@@ -54,19 +54,23 @@ use crate::buddy::WireDecision;
 /// initial heartbeat snapshot.
 ///
 /// Wire shape: `{"hello": {"version": 1, "owner": "Felix", "time": [epoch, tz]}}`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HelloMessage {
+    #[serde(default)]
     pub hello: Hello,
 }
 
 /// Payload of the `hello` field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Hello {
     /// Protocol version.  Currently `1`.  Bumps on backwards-incompatible changes.
+    #[serde(default)]
     pub version: u32,
     /// Owner name (from `git config user.name` or `$USER`).
+    #[serde(default)]
     pub owner: String,
     /// `[epoch_seconds, tz_offset_seconds]` — same shape as [`crate::buddy::TimeSync`].
+    #[serde(default)]
     pub time: (i64, i32),
 }
 
@@ -155,13 +159,15 @@ pub enum Command {
 ///
 /// Mirrors the BLE convention ([`crate::buddy::DeviceAck`]) so a future TUI
 /// can share parsing logic.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Ack {
     /// Echoes the `cmd` value of the command being acknowledged.
+    #[serde(default)]
     pub ack: String,
+    #[serde(default)]
     pub ok: bool,
     /// Human-readable error description when `ok` is false.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -218,6 +224,36 @@ mod tests {
         assert_eq!(v["hello"]["version"], 1);
         assert_eq!(v["hello"]["owner"], "Felix");
         assert_eq!(v["hello"]["time"][1], -25200);
+    }
+
+    #[test]
+    fn hello_tolerates_missing_fields() {
+        // A future field rename or older client that omits version/owner/time
+        // must not blow up the whole message — defaults instead.
+        let raw = json!({"hello": {}});
+        let msg: HelloMessage = serde_json::from_value(raw).expect("must accept empty hello");
+        assert_eq!(msg.hello.version, 0);
+        assert!(msg.hello.owner.is_empty());
+        assert_eq!(msg.hello.time, (0, 0));
+
+        // Even a totally empty top-level object should deserialise.
+        let raw_empty: HelloMessage =
+            serde_json::from_value(json!({})).expect("must accept empty top-level");
+        assert_eq!(raw_empty.hello.version, 0);
+    }
+
+    #[test]
+    fn ack_tolerates_missing_fields() {
+        // Older sender that ships only `{"ok": true}` must round-trip rather
+        // than fail-deserialise.
+        let ack: Ack = serde_json::from_value(json!({"ok": true}))
+            .expect("must accept ack with no `ack` field");
+        assert!(ack.ack.is_empty());
+        assert!(ack.ok);
+
+        // Empty object → all defaults.
+        let empty: Ack = serde_json::from_value(json!({})).expect("must accept empty object");
+        assert!(!empty.ok);
     }
 
     // -----------------------------------------------------------------------

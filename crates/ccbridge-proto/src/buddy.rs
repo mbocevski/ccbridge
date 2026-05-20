@@ -42,7 +42,7 @@ use serde_json::Value;
 ///   "prompt": {"id": "req_abc123", "tool": "Bash", "hint": "rm -rf /tmp/foo"}
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Heartbeat {
     /// Total number of open sessions.
     #[serde(default)]
@@ -71,7 +71,7 @@ pub struct Heartbeat {
 }
 
 /// Pending permission prompt embedded in [`Heartbeat`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptInfo {
     /// Opaque request ID — must be echoed back in the permission decision.
     #[serde(default)]
@@ -257,16 +257,18 @@ pub enum DeviceCommand {
 /// Generic ack sent by the desktop for every command it receives.
 ///
 /// Wire shape: `{"ack":"<cmd>","ok":true,"n":0}`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceAck {
     /// Echoes the `cmd` field of the command being acked.
+    #[serde(default)]
     pub ack: String,
+    #[serde(default)]
     pub ok: bool,
     /// Generic counter (bytes written for chunk acks; 0 otherwise).
     #[serde(default)]
     pub n: u64,
     /// Human-readable error when `ok` is false.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -310,11 +312,14 @@ impl DeviceAck {
 /// ```
 ///
 /// All sub-fields are optional — omit what you don't have.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StatusAck {
     /// Always `"status"`.
+    #[serde(default)]
     pub ack: String,
+    #[serde(default)]
     pub ok: bool,
+    #[serde(default)]
     pub data: StatusData,
 }
 
@@ -615,5 +620,33 @@ mod tests {
         assert_eq!(v["ok"], true);
         // error field omitted when None
         assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn device_ack_tolerates_missing_fields() {
+        // A future rename or older sender shipping `{}` must not hard-fail.
+        let ack: DeviceAck =
+            serde_json::from_value(json!({})).expect("DeviceAck must accept empty object");
+        assert!(ack.ack.is_empty());
+        assert!(!ack.ok);
+        assert_eq!(ack.n, 0);
+        assert!(ack.error.is_none());
+    }
+
+    #[test]
+    fn status_ack_tolerates_missing_fields() {
+        // Older sender shipping just `{"ack":"status"}` (no data) must
+        // deserialise — data falls through to StatusData default.
+        let ack: StatusAck = serde_json::from_value(json!({"ack": "status"}))
+            .expect("StatusAck must accept missing data");
+        assert_eq!(ack.ack, "status");
+        assert!(!ack.ok);
+        assert!(ack.data.name.is_none());
+        assert!(ack.data.bat.is_none());
+
+        // Fully empty object also works.
+        let empty: StatusAck =
+            serde_json::from_value(json!({})).expect("StatusAck must accept empty object");
+        assert!(empty.ack.is_empty());
     }
 }
