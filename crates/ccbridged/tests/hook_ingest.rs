@@ -225,6 +225,7 @@ async fn pre_tool_use_allow_decision() {
         .send(AggregatorMsg::PermissionDecision {
             tool_use_id: "toolu_allow_001".to_owned(),
             decision: WireDecision::Once,
+            respond: None,
         })
         .await
         .unwrap();
@@ -270,6 +271,7 @@ async fn pre_tool_use_deny_decision() {
         .send(AggregatorMsg::PermissionDecision {
             tool_use_id: "toolu_deny_001".to_owned(),
             decision: WireDecision::Deny,
+            respond: None,
         })
         .await
         .unwrap();
@@ -439,6 +441,7 @@ async fn wire_once_maps_to_allow() {
         .send(AggregatorMsg::PermissionDecision {
             tool_use_id: "toolu_map_001".to_owned(),
             decision: WireDecision::Once,
+            respond: None,
         })
         .await
         .unwrap();

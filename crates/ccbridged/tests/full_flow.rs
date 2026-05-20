@@ -755,21 +755,14 @@ async fn expired_id_ctrl_decision_returns_ack() {
         .await
         .expect("ack must arrive within 2s");
     assert_eq!(ack.ack, "permission", "ack must name the command");
-    // Document the current ack-shape: the ctrl handler optimistically
-    // returns ok:true for permission cmds without round-tripping through
-    // the aggregator. The aggregator logs a warn for unknown ids but
-    // doesn't propagate that back to ctrl. This may change later (a
-    // follow-up could plumb a one-shot result back so unknown ids ack
-    // ok:false with an error). Until then, pin the current behaviour
-    // so a regression that swallows or panics on unknown ids is caught.
     assert!(
-        ack.ok,
-        "current ctrl behaviour: permission ack is ok:true even for \
-         unknown ids (aggregator logs warn but doesn't reply); got: {ack:?}",
+        !ack.ok,
+        "ack.ok must be false for an unknown tool_use_id (got: {ack:?})",
     );
-    assert!(
-        ack.error.is_none(),
-        "no error in body when ok:true; got: {ack:?}",
+    assert_eq!(
+        ack.error.as_deref(),
+        Some("unknown_id"),
+        "unknown-id ack must carry error=\"unknown_id\", got: {ack:?}",
     );
 }
 

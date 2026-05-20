@@ -337,15 +337,32 @@ where
         }
 
         Command::Permission { id, decision } => {
-            // Forward to aggregator.  Ignore send errors — aggregator may be
-            // shutting down, connection will close on next iteration.
-            let _ = agg_tx
+            // Round-trip through the aggregator so the ack reflects whether
+            // the decision actually applied.  Stale clicks (id no longer in
+            // the pending map after a daemon restart or post-timeout race)
+            // ack with ok:false / "unknown_id" so the client knows the
+            // user's input was discarded.
+            use crate::state::PermissionDecisionResult;
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            if agg_tx
                 .send(AggregatorMsg::PermissionDecision {
                     tool_use_id: id,
                     decision,
+                    respond: Some(resp_tx),
                 })
-                .await;
-            write_json_line(writer, &Ack::ok("permission")).await
+                .await
+                .is_err()
+            {
+                // Aggregator is shutting down — connection will close on the
+                // next iteration. Ack with the failure for this one cmd.
+                return write_json_line(writer, &Ack::err("permission", "aggregator_gone")).await;
+            }
+            let ack = match resp_rx.await {
+                Ok(PermissionDecisionResult::Applied) => Ack::ok("permission"),
+                Ok(PermissionDecisionResult::UnknownId) => Ack::err("permission", "unknown_id"),
+                Err(_) => Ack::err("permission", "aggregator_gone"),
+            };
+            write_json_line(writer, &ack).await
         }
 
         Command::Status => {

@@ -81,9 +81,15 @@ pub enum AggregatorMsg {
     /// An emit module (swaync, BLE, ctrl-socket) has resolved a pending
     /// permission prompt.  The aggregator pops the waiting oneshot from
     /// `pending` and fires it.
+    ///
+    /// `respond` is optional: emitters that don't care about the result
+    /// (notify, AllowlistAlways) pass `None`.  ctrl passes `Some(tx)` so
+    /// it can ack `ok:false / "unknown_id"` for stale clicks instead of
+    /// optimistically returning `ok:true`.
     PermissionDecision {
         tool_use_id: ToolUseId,
         decision: WireDecision,
+        respond: Option<oneshot::Sender<PermissionDecisionResult>>,
     },
 
     /// Return a snapshot of the current heartbeat state.  Used by emit modules
@@ -124,6 +130,21 @@ pub enum AggregatorMsg {
     /// case), the call is denied with a helpful reason rather than risking
     /// a too-broad pattern being silently written.
     AllowlistAlways { tool_use_id: ToolUseId },
+}
+
+/// Outcome of an `AggregatorMsg::PermissionDecision`, returned through
+/// the optional `respond` oneshot.
+///
+/// `Applied` means the aggregator found a pending approval matching the
+/// `tool_use_id` and dispatched the decision to the hook handler.
+///
+/// `UnknownId` means there was no pending approval — typically a stale
+/// click after a daemon restart, or a decision that arrived after the
+/// approval timeout already fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionDecisionResult {
+    Applied,
+    UnknownId,
 }
 
 // ---------------------------------------------------------------------------
@@ -625,7 +646,11 @@ impl Aggregator {
         });
     }
 
-    fn handle_permission_decision(&mut self, tool_use_id: ToolUseId, decision: WireDecision) {
+    fn handle_permission_decision(
+        &mut self,
+        tool_use_id: ToolUseId,
+        decision: WireDecision,
+    ) -> PermissionDecisionResult {
         match self.pending.remove(&tool_use_id) {
             Some((tx, _approval)) => {
                 for session in self.sessions.values_mut() {
@@ -640,9 +665,11 @@ impl Aggregator {
                         "approval receiver gone before decision fired (timeout won the race)",
                     );
                 }
+                PermissionDecisionResult::Applied
             }
             None => {
                 warn!(tool_use_id = %tool_use_id, "no pending approval for this tool_use_id");
+                PermissionDecisionResult::UnknownId
             }
         }
     }
@@ -728,8 +755,12 @@ impl Aggregator {
                         Some(AggregatorMsg::HookEvent { event, respond }) => {
                             self.handle_hook_event(*event, respond);
                         }
-                        Some(AggregatorMsg::PermissionDecision { tool_use_id, decision }) => {
-                            self.handle_permission_decision(tool_use_id, decision);
+                        Some(AggregatorMsg::PermissionDecision { tool_use_id, decision, respond }) => {
+                            let result = self.handle_permission_decision(tool_use_id, decision);
+                            if let Some(tx) = respond {
+                                // Receiver may have given up — fine to ignore.
+                                let _ = tx.send(result);
+                            }
                         }
                         Some(AggregatorMsg::GetHeartbeat { respond }) => {
                             let _ = respond.send(self.snapshot());
@@ -1580,6 +1611,7 @@ mod tests {
         tx.send(AggregatorMsg::PermissionDecision {
             tool_use_id: "toolu_run1".to_owned(),
             decision: WireDecision::Once,
+            respond: None,
         })
         .await
         .unwrap();

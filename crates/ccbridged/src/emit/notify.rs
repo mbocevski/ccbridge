@@ -492,6 +492,7 @@ async fn handle_action(
                 .send(AggregatorMsg::PermissionDecision {
                     tool_use_id,
                     decision: WireDecision::Once,
+                    respond: None,
                 })
                 .await;
         }
@@ -507,6 +508,7 @@ async fn handle_action(
                 .send(AggregatorMsg::PermissionDecision {
                     tool_use_id,
                     decision: WireDecision::Deny,
+                    respond: None,
                 })
                 .await;
         }
