@@ -20,6 +20,10 @@ use tokio::net::UnixStream;
 
 /// Write a config.toml with an extremely short timeout, load it, and return
 /// the loaded `Config`.
+///
+/// Uses `Config::load_from(&path)` rather than `Config::load()` to avoid
+/// mutating `XDG_CONFIG_HOME` — set_var/remove_var on a process-global env
+/// var is not safe under cargo's default parallel test execution.
 fn write_and_load_config(dir: &TempDir, timeout_ms: u64) -> ccbridged::config::Config {
     let config_dir = dir.path().join("ccbridge");
     std::fs::create_dir_all(&config_dir).unwrap();
@@ -31,12 +35,7 @@ fn write_and_load_config(dir: &TempDir, timeout_ms: u64) -> ccbridged::config::C
     )
     .unwrap();
 
-    // Point XDG_CONFIG_HOME at the tempdir so Config::load() finds our file.
-    std::env::set_var("XDG_CONFIG_HOME", dir.path());
-    let cfg = ccbridged::config::Config::load().expect("config must load");
-    // Reset so other tests aren't affected.
-    std::env::remove_var("XDG_CONFIG_HOME");
-    cfg
+    ccbridged::config::Config::load_from(&config_path).expect("config must load")
 }
 
 // ---------------------------------------------------------------------------
