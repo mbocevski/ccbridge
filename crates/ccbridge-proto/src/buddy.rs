@@ -24,6 +24,9 @@
 //! * [`DeviceAck`]     — ack for any command the desktop sent
 //! * [`StatusAck`]     — special ack for `{"cmd":"status"}`
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

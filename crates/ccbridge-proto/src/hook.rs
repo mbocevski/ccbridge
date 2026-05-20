@@ -30,6 +30,8 @@
 //! {"session_id":"…","hook_event_name":"SessionStart","source":"startup","model":"…"}
 //! ```
 
+use alloc::string::String;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
