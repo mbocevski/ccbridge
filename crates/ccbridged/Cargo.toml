@@ -56,7 +56,7 @@ daemon and a bidirectional control socket."""
 section = "utils"
 priority = "optional"
 depends = "$auto"
-recommends = "swaync | mako-notifier | dunst | notification-daemon"
+suggests = "dunst | mako-notifier | swaync | notification-daemon"
 maintainer-scripts = "../../debian/maintainer-scripts/"
 assets = [
     ["../../target/release/ccbridged",              "usr/bin/",                                        "755"],
