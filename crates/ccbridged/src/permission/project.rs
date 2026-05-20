@@ -42,6 +42,11 @@ pub fn find_project_root(cwd: &Path) -> Option<PathBuf> {
 /// Same as [`find_project_root`] but takes `home` explicitly so tests don't
 /// need to mutate `$HOME`.
 pub(crate) fn find_project_root_with_home(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    // Reject relative paths — callers must pass an absolute cwd.
+    if cwd.is_relative() {
+        return None;
+    }
+
     let mut p: &Path = cwd;
     loop {
         // Never treat $HOME itself as a project root — its `.claude/` is the
@@ -49,12 +54,24 @@ pub(crate) fn find_project_root_with_home(cwd: &Path, home: Option<&Path>) -> Op
         if home == Some(p) {
             return None;
         }
-        if p.join(".claude").is_dir() {
-            return Some(p.to_path_buf());
+
+        // Check `.claude` using symlink_metadata so we inspect the entry
+        // itself rather than following symlinks.  A symlinked `.claude →
+        // /etc` must not be treated as a project marker.
+        if let Ok(meta) = p.join(".claude").symlink_metadata() {
+            if meta.is_dir() {
+                return Some(p.to_path_buf());
+            }
         }
-        if p.join(".git").exists() {
-            return Some(p.to_path_buf());
+
+        // `.git` can be a file (git worktree pointer) or a directory — both
+        // are legitimate.  A symlink to either is rejected.
+        if let Ok(meta) = p.join(".git").symlink_metadata() {
+            if !meta.file_type().is_symlink() && (meta.is_dir() || meta.is_file()) {
+                return Some(p.to_path_buf());
+            }
         }
+
         match p.parent() {
             Some(parent) => p = parent,
             None => return None,
@@ -146,6 +163,33 @@ mod tests {
         assert!(
             result.is_none(),
             "$HOME with .claude/ must not be treated as a project root, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn find_project_root_rejects_relative_cwd() {
+        // Relative cwd must return None — no env-var-based resolution.
+        let result = find_project_root_with_home(Path::new("relative/path"), None);
+        assert!(
+            result.is_none(),
+            "relative cwd must return None, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn find_project_root_rejects_dotclaude_symlink() {
+        // A .claude that is a symlink (even to a real directory) must NOT be
+        // treated as a project marker — symlinks could point outside the tree.
+        let dir = TempDir::new().unwrap();
+        // Create the symlink target (a real dir we can point at).
+        let target = TempDir::new().unwrap();
+        // Symlink: <dir>/.claude → <target>
+        std::os::unix::fs::symlink(target.path(), dir.path().join(".claude")).unwrap();
+
+        let result = find_project_root_with_home(dir.path(), None);
+        assert!(
+            result.is_none(),
+            ".claude symlink must not be treated as a project marker, got {result:?}"
         );
     }
 

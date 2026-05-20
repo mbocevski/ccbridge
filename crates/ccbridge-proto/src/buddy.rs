@@ -45,21 +45,28 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Heartbeat {
     /// Total number of open sessions.
+    #[serde(default)]
     pub total: u32,
     /// Sessions actively generating output.
+    #[serde(default)]
     pub running: u32,
     /// Sessions blocked on a permission prompt.
+    #[serde(default)]
     pub waiting: u32,
     /// One-line summary for a small display.
+    #[serde(default)]
     pub msg: String,
     /// Recent transcript lines, newest first (capped to a few entries).
+    #[serde(default)]
     pub entries: Vec<String>,
     /// Cumulative output tokens since the daemon started.
+    #[serde(default)]
     pub tokens: u64,
     /// Output tokens since local midnight (persisted across restarts).
+    #[serde(default)]
     pub tokens_today: u64,
     /// Present only when a permission decision is pending.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<PromptInfo>,
 }
 
@@ -67,10 +74,13 @@ pub struct Heartbeat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptInfo {
     /// Opaque request ID — must be echoed back in the permission decision.
+    #[serde(default)]
     pub id: String,
     /// Name of the tool requesting permission (e.g. `"Bash"`).
+    #[serde(default)]
     pub tool: String,
     /// Short hint showing what the tool intends to do.
+    #[serde(default)]
     pub hint: String,
 
     // Annotation fields — present only when the decision came from
@@ -376,6 +386,22 @@ pub struct DeviceStats {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn heartbeat_minimal_fields_defaults() {
+        // A stripped-down Heartbeat (only `total`) must deserialise successfully
+        // with sensible defaults for all other fields — defensive for future
+        // daemon versions that omit fields older clients don't know about.
+        let hb: Heartbeat = serde_json::from_str(r#"{"total":0}"#).unwrap();
+        assert_eq!(hb.total, 0);
+        assert_eq!(hb.running, 0);
+        assert_eq!(hb.waiting, 0);
+        assert_eq!(hb.msg, "");
+        assert!(hb.entries.is_empty());
+        assert_eq!(hb.tokens, 0);
+        assert_eq!(hb.tokens_today, 0);
+        assert!(hb.prompt.is_none());
+    }
 
     #[test]
     fn heartbeat_no_prompt() {
