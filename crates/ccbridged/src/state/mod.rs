@@ -16,7 +16,7 @@
 //! # Heartbeat fanout
 //!
 //! The aggregator owns a [`broadcast::Sender<Heartbeat>`] (capacity 16).
-//! Every emit module (swaync, BLE, ctrl-socket, HTTP) subscribes to a
+//! Every emit module (notify, BLE, ctrl-socket, HTTP) subscribes to a
 //! [`broadcast::Receiver`] before the aggregator task starts.  The aggregator
 //! calls `hb_tx.send()` on every state change and on a 10 s keepalive tick.
 //! Slow receivers that fall behind get a `Lagged` error and skip ahead —
@@ -78,7 +78,7 @@ pub enum AggregatorMsg {
         respond: oneshot::Sender<HookOutcome>,
     },
 
-    /// An emit module (swaync, BLE, ctrl-socket) has resolved a pending
+    /// An emit module (notify, BLE, ctrl-socket) has resolved a pending
     /// permission prompt.  The aggregator pops the waiting oneshot from
     /// `pending` and fires it.
     ///
@@ -96,7 +96,7 @@ pub enum AggregatorMsg {
     /// that need the current state on demand (e.g. ctrl-socket initial burst).
     GetHeartbeat { respond: oneshot::Sender<Heartbeat> },
 
-    /// Token counts updated by the JSONL tail (task 27993d8d).
+    /// Token counts updated by the JSONL tail.
     ///
     /// `session_id` is the JSONL file's UUID stem when known.  When
     /// present, the aggregator also bumps that session's
@@ -146,7 +146,7 @@ pub enum AggregatorMsg {
     /// `handle_permission_decision` path logs a warn and discards it.
     ApprovalTimedOut { tool_use_id: ToolUseId },
 
-    /// User clicked "Always" on a swaync notification.  The aggregator
+    /// User clicked "Always" on an approval notification.  The aggregator
     /// derives the most-conservative allowlist pattern for the pending event,
     /// writes it to `settings.local.json`, and approves the current call.
     ///

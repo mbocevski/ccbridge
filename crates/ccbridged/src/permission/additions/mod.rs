@@ -3,7 +3,7 @@
 //!
 //! # Purpose
 //!
-//! When the user clicks **Always** on a swaync approval notification,
+//! When the user clicks **Always** on an approval notification,
 //! ccbridge needs to:
 //! 1. Derive the most-conservative pattern that would match this tool call.
 //! 2. Write it to `~/.claude/settings.json`'s `permissions.allow` array.

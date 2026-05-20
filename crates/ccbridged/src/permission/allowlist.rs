@@ -182,7 +182,8 @@ mod tests {
 
     #[test]
     fn real_world_settings_shape() {
-        // Real-world settings.json shape: allow=5, deny=14.
+        // Real-world settings.json shape: allow=5, deny=14 (a sample
+        // user's configuration).
         let root = json!({
             "permissions": {
                 "allow": [

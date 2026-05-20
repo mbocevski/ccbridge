@@ -326,7 +326,7 @@ async fn pre_tool_use_timeout_sends_ask() {
 }
 
 /// After timeout, the aggregator's pending approval is cleared so emitters
-/// (swaync, ctrl) see prompt:None / waiting:0 on the next heartbeat.
+/// (notify, ctrl) see prompt:None / waiting:0 on the next heartbeat.
 #[tokio::test]
 async fn pre_tool_use_timeout_clears_aggregator_state() {
     let (_keep_dir, agg_tx, runtime_dir) = setup(Duration::from_millis(50)).await;

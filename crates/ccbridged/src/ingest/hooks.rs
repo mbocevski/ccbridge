@@ -206,7 +206,7 @@ async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMs
                 }
                 Err(_elapsed) => {
                     // Timeout elapsed with no decision from any emit module.
-                    // 1. Tell the aggregator to clear pending state so swaync /
+                    // 1. Tell the aggregator to clear pending state so notify /
                     //    ctrl / BLE see prompt:None on the next heartbeat.
                     let _ = agg_tx
                         .send(AggregatorMsg::ApprovalTimedOut {

@@ -192,8 +192,8 @@ pub fn write_default_config_if_absent() -> Result<ConfigAction> {
 /// by an interrupted setup.  Creates the parent directory if needed.
 ///
 /// Split out from [`write_default_config_if_absent`] so tests can drive it
-/// against a tempdir without mutating `XDG_CONFIG_HOME` (which would race
-/// with parallel tests; see task 56 for the lesson learned).
+/// against a tempdir without mutating `XDG_CONFIG_HOME` — process-global
+/// env mutation races with parallel test execution.
 fn write_default_config_to(path: &Path) -> Result<ConfigAction> {
     if path.exists() {
         return Ok(ConfigAction::AlreadyPresent {

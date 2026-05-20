@@ -17,10 +17,10 @@ path = "src/main.rs"
 
 # Feature flags
 # -------------
-# ble  — BlueZ/bluer NUS peripheral emitter.  Enabled by default; Pixelbook
-#         builds pass --no-default-features because no BLE controller is exposed
-#         through Sommelier.  All other emit paths (swaync, ctrl, http) are
-#         always-on and do not require a feature flag.
+# ble — placeholder for the v2 BLE bridge.  Enabled by default; machines
+#       without a BLE controller (or maintainers who don't want to compile
+#       BLE code) pass --no-default-features.  All other emit paths
+#       (notify, ctrl, http) are always-on and do not require a feature flag.
 [features]
 default = ["ble"]
 ble = []
@@ -34,7 +34,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-# DBus session-bus client for swaync notifications (tokio feature; default drops smol/async-io)
+# DBus session-bus client for freedesktop notifications (tokio feature; default drops smol/async-io)
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 # StreamExt for zbus signal streams (already a transitive dep via zbus/futures-lite)
 futures-lite = "2"
@@ -82,8 +82,8 @@ copyright = "2026, Marko Bocevski <marko.bocevski@gmail.com>"
 license-file = ["../../LICENSE", "0"]
 extended-description = """
 ccbridge aggregates state across all running Claude Code sessions on this
-machine and surfaces approval prompts via freedesktop notifications (swaync,
-mako, dunst, GNOME, KDE) and a bidirectional control socket."""
+machine and surfaces approval prompts through your freedesktop notification
+daemon and a bidirectional control socket."""
 section = "utils"
 priority = "optional"
 # `$auto` resolves to whatever shared libraries the binary actually links

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
-//! BLE Hardware Buddy wire-protocol types.
+//! BLE hardware-bridge wire-protocol types.
 //!
-//! Exact JSON shapes from `~/dev/claude-desktop-buddy/REFERENCE.md`.
+//! Exact JSON shapes documented in the upstream hardware-bridge spec
+//! (the same wire format the Claude desktop apps speak over BLE NUS).
 //! ccbridged emits these over the Nordic UART Service TX characteristic
 //! (and identically over the control socket — types are shared).
 //!

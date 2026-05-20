@@ -14,7 +14,7 @@ pkgname=ccbridge-git
 # pkgver is computed dynamically by pkgver(); this static value is a placeholder.
 pkgver=0
 pkgrel=1
-pkgdesc="Claude Code hook aggregator — bridges Claude Code sessions to BLE/swaync/HTTP emitters"
+pkgdesc="Claude Code hook aggregator — surfaces approvals via freedesktop notifications and a control socket"
 arch=('x86_64')
 url="https://github.com/mbocevski/ccbridge"
 license=('MIT')

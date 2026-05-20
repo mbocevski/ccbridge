@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! Freedesktop notification daemon emitter (works with swaync, mako, dunst,
-//! GNOME, KDE, …) — speaks `org.freedesktop.Notifications` via zbus.
+//! Freedesktop notification daemon emitter — speaks
+//! `org.freedesktop.Notifications` via zbus.  Compatible with any daemon
+//! that implements the spec.
 //!
 //! # What this module does
 //!
@@ -128,7 +129,7 @@ async fn run(
     mut turn_done_rx: broadcast::Receiver<crate::state::TurnDoneEvent>,
     turn_done_expire_ms: i32,
 ) -> Result<()> {
-    // Connect to the session bus.  If swaync / a notifications daemon is not
+    // Connect to the session bus.  If a notifications daemon is not
     // running, or the bus itself is absent (headless CI), this returns an
     // error and we bail out before any loop begins.
     let conn = match Connection::session().await {
@@ -209,7 +210,7 @@ async fn run(
     // dismissal and let the new prompt through.
     let mut last_prompt_ids: HashMap<String, String> = HashMap::new();
 
-    // First-stale-click feedback: after a daemon restart, an orphaned swaync
+    // First-stale-click feedback: after a daemon restart, an orphaned
     // action click arrives for an id we don't recognise.  Post a one-time
     // notification explaining what happened so the user isn't confused.
     //
@@ -453,7 +454,7 @@ async fn handle_heartbeat(
             .map(crate::util::short_session_id);
 
         // Summary: include cwd when available so parallel notifications
-        // are visually distinct in the swaync stack.
+        // are visually distinct in the notification stack.
         let summary = match cwd_short.as_deref() {
             Some(c) => format!("Claude Code [{}]: approve {}?", c, prompt.tool),
             None => format!("Claude Code: approve {}?", prompt.tool),
@@ -881,10 +882,10 @@ async fn close_all(
 /// Format a token count compactly: `1.2k`, `184k`, `2.5M`.
 ///
 /// The compact form is also a defence against notification daemons
-/// (swaync, dunst, …) that auto-detect long digit clusters as
-/// "OTP-like" and inject a "copy code" action button into the
-/// notification.  Splitting `1172` into `1.2k` defeats the heuristic
-/// and is easier to read on a compact display.
+/// that auto-detect long digit clusters as "OTP-like" and inject a
+/// "copy code" action button into the notification.  Splitting `1172`
+/// into `1.2k` defeats the heuristic and is easier to read on a
+/// compact display.
 fn format_token_count(n: u64) -> String {
     const K: u64 = 1_000;
     const M: u64 = 1_000_000;
@@ -1084,9 +1085,9 @@ mod tests {
 
     #[test]
     fn format_token_count_no_long_digit_runs() {
-        // The defence against the swaync "OTP detector": no compact
-        // representation should have 4+ consecutive digits (which is
-        // what the daemon's heuristic flags as a copyable code).
+        // The defence against the notification daemon's "OTP detector":
+        // no compact representation should have 4+ consecutive digits
+        // (which is what such heuristics flag as a copyable code).
         for n in [1_000_u64, 1_172, 9_999, 10_000, 184_502, 1_000_000] {
             let s = format_token_count(n);
             let max_run = s
@@ -1103,7 +1104,7 @@ mod tests {
             assert!(
                 max_run <= 3,
                 "format_token_count({n}) = {s:?} has a {max_run}-digit run; \
-                 swaync's OTP heuristic may flag it",
+                 the notification daemon's OTP heuristic may flag it",
             );
         }
     }

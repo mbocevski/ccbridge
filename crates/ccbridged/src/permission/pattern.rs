@@ -13,7 +13,7 @@
 //!
 //! Every "Confident" match must be conservative: when in doubt, return
 //! [`MatchResult::Ambiguous`] not `Confident`.  A false-confident-allow skips
-//! the swaync prompt entirely for a call the user never explicitly okayed.
+//! the approval prompt entirely for a call the user never explicitly okayed.
 
 use ccbridge_proto::hook::PreToolUseEvent;
 

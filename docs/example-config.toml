@@ -29,7 +29,7 @@ fallback = "passthrough"
 
 # ---------------------------------------------------------------------------
 # [emit.notify] — freedesktop desktop notifications
-#                 (works with swaync, mako, dunst, GNOME, KDE, …)
+#                 (any daemon implementing org.freedesktop.Notifications)
 # ---------------------------------------------------------------------------
 
 [emit.notify]

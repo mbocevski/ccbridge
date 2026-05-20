@@ -4,17 +4,17 @@
 
 ccbridge is a background daemon for Linux that hooks into Claude Code and
 aggregates state across all running sessions. When a tool call needs your
-approval, it surfaces a dismissable notification via swaync (or any
-freedesktop-compatible notification daemon: mako, dunst, GNOME, KDE) with
-Approve / Deny / Always actions so you can decide without switching windows.
-A bidirectional control socket lets any script or TUI read live session
-state — token counts, running/waiting counts, current approval prompt — and
-send decisions back.
+approval, it surfaces a dismissable notification through your freedesktop
+notification daemon with Approve / Deny / Always actions so you can decide
+without switching windows. A bidirectional control socket lets any script
+or TUI read live session state — token counts, running/waiting counts,
+current approval prompts — and send decisions back.
 
 **v1 scope:** Arch Linux only, freedesktop notifications and control socket.
-A BLE bridge to claude-desktop-buddy hardware is planned for v2 — the
-control socket already speaks the buddy wire protocol, so a BLE bridge
-can live as a separate process that connects to ctrl.sock.
+A BLE hardware bridge is planned for v2 — the control socket is the
+documented integration point, so any out-of-process bridge can live
+alongside the daemon and translate ctrl-protocol bytes onto whatever
+transport it needs.
 
 ## Install (Arch Linux)
 

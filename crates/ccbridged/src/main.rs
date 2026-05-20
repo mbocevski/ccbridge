@@ -2,9 +2,11 @@
 //! ccbridged — Claude Code aggregator bridge daemon.
 //!
 //! Aggregates state across all running Claude Code sessions on this machine
-//! and surfaces them through freedesktop notifications (swaync, mako, dunst,
-//! GNOME, KDE) and a bidirectional control socket. The control socket also
-//! exposes the claude-desktop-buddy wire protocol for future BLE bridges.
+//! and surfaces them through the freedesktop notification daemon and a
+//! bidirectional control socket. The control socket is the integration
+//! point for any future bridges — the wire format is documented in
+//! `docs/control-protocol.md` so external scripts or hardware bridges
+//! can consume it directly.
 //!
 //! # Socket directory
 //!
@@ -16,8 +18,10 @@
 //!
 //! # Feature flags
 //!
-//! * `ble` (default) — BlueZ/bluer NUS peripheral.  Pixelbook builds pass
-//!   `--no-default-features`; all other emit paths compile unconditionally.
+//! * `ble` (default) — placeholder for the future BLE bridge.  Machines
+//!   without a BLE controller, or maintainers who don't want to compile
+//!   BLE code, can pass `--no-default-features` to skip it.  All other
+//!   emit paths compile unconditionally.
 
 use std::sync::Arc;
 
@@ -217,7 +221,7 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
     }
 
     // Spawn emit tasks (guarded by config flags).
-    // swaync subscribes via resubscribe() so ctrl can consume hb_rx directly.
+    // notify subscribes via resubscribe() so ctrl can consume hb_rx directly.
     if config.emit.notify.enabled {
         notify_emit::spawn(
             agg_tx.clone(),

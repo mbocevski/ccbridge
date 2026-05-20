@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 //! Hook ingest + JSONL tail.
-//! Hook ingest: task 362c957e (implemented).
-//! JSONL tail:  task 27993d8d (stub).
+//!
+//! `hooks` accepts ccbridge-hook subprocess connections on a unix
+//! socket and forwards each event into the aggregator.
+//! `jsonl` watches `~/.claude/projects/**/*.jsonl` for new assistant
+//! lines and turns their `output_tokens` field into a TokensUpdate
+//! flowing into the aggregator.
 
 pub mod hooks;
 pub mod jsonl;

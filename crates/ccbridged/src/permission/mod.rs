@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn evaluate_real_world_skill_allows() {
-        // Real-world settings: "Skill" in allow.
+        // Real-world allow pattern: "Skill" plus a few MCP plugins.
         let al = allowlist_with(
             &[
                 "Skill",
