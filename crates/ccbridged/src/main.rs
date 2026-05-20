@@ -3,10 +3,8 @@
 //!
 //! Aggregates state across all running Claude Code sessions on this machine
 //! and surfaces them through the freedesktop notification daemon and a
-//! bidirectional control socket. The control socket is the integration
-//! point for any future bridges — the wire format is documented in
-//! `docs/control-protocol.md` so external scripts or hardware bridges
-//! can consume it directly.
+//! bidirectional control socket.  Protocol types are defined in the
+//! `ccbridge-proto` crate (`buddy.rs`, `ctrl.rs`).
 //!
 //! # Socket directory
 //!

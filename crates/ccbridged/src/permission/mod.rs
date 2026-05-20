@@ -9,14 +9,13 @@
 //! - Short-circuits with an immediate allow/deny (no notification, no oneshot),
 //! - Or calls `start_intercept()` for the normal hold-and-wait flow.
 //!
-//! ## Phase 1
-//! Only checks `permission_mode`.  Permissive modes (`acceptEdits`, `auto`,
-//! `dontAsk`, `bypassPermissions`) → `Decision::Allow`.  Others → `Decision::Intercept`.
-//!
-//! ## Phase 2
-//! Also checks `permissions.allow` / `permissions.deny` from `settings.json`
-//! via the [`Allowlist`].  Deny wins over allow; ambiguous patterns surface
-//! as [`Decision::AskAnnotated`].
+//! Decision flow:
+//! 1. Permissive `permission_mode`s (`acceptEdits`, `auto`, `dontAsk`,
+//!    `bypassPermissions`) short-circuit to [`Decision::Allow`].
+//! 2. Otherwise, cascade through `permissions.allow` / `permissions.deny`
+//!    via the [`Allowlist`].  Deny wins over allow; ambiguous patterns
+//!    surface as [`Decision::AskAnnotated`].
+//! 3. No match → [`Decision::Intercept`] (hold-and-wait approval).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -387,7 +386,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 2: allowlist matching
+    // allowlist matching
     // -----------------------------------------------------------------------
 
     #[test]

@@ -2,10 +2,10 @@
 //! Integration tests for `ccbridged undo-last-allow` CLI dispatch.
 //!
 //! These tests run the real `ccbridged` binary as a subprocess and verify
-//! that audit-root validation (G3) is exercised through the CLI path, not
-//! just the library unit tests. The failure modes we care about — tampered
-//! audit logs with "/" or trailing-`.` roots — must produce a non-zero
-//! exit code and a descriptive error on stderr.
+//! that audit-root validation is exercised through the CLI path, not just
+//! the library unit tests.  Tampered audit logs with `/` or trailing-`.`
+//! roots must produce a non-zero exit code and a descriptive error on
+//! stderr.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

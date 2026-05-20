@@ -382,10 +382,6 @@ where
             write_json_line(writer, &ack).await
         }
 
-        // Not yet implemented — ack as unknown_command per spec.
-        // Replay: heartbeat history not kept by the aggregator yet.
-        // ForgetDevice: BLE-specific, lands with emit::ble.
-        // Simulate: gated by config.allow_simulate which doesn't exist yet.
         Command::Replay { .. } => write_json_line(writer, &Ack::unknown("replay")).await,
         Command::ForgetDevice { .. } => {
             write_json_line(writer, &Ack::unknown("forget_device")).await

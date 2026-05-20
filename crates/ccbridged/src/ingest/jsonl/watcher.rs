@@ -56,9 +56,6 @@ async fn run_watcher(
     // Track the date the current `today` counter belongs to.  We use the
     // persisted date if available so we don't recompute it on every persist and
     // don't accidentally advance the date boundary until midnight-reset fires.
-    //
-    // TODO: plumb `DailyReset` acknowledgement back into the watcher so it can
-    // update `current_date` without relying solely on the midnight-reset task.
     let current_date = if initial_tokens.date.is_empty() {
         current_utc_date_string()
     } else {

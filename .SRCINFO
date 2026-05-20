@@ -1,5 +1,5 @@
 pkgbase = ccbridge-git
-	pkgdesc = Claude Code hook aggregator — bridges Claude Code sessions to BLE/swaync/HTTP emitters
+	pkgdesc = Claude Code hook aggregator — surfaces approvals via freedesktop notifications and a control socket
 	pkgver = 0
 	pkgrel = 1
 	url = https://github.com/mbocevski/ccbridge
@@ -10,7 +10,7 @@ pkgbase = ccbridge-git
 	makedepends = git
 	provides = ccbridge
 	conflicts = ccbridge
-	source = ccbridge::git+file:///home/user/dev/ccbridge
+	source = ccbridge::git+https://github.com/mbocevski/ccbridge.git
 	sha256sums = SKIP
 
 pkgname = ccbridge-git

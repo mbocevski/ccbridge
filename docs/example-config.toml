@@ -5,7 +5,7 @@
 #
 # All values shown below are the compiled-in defaults.
 # You only need to include keys you want to override.
-# Unknown keys are rejected with a clear error (no silent typo forgiveness).
+# Unknown keys are rejected with a clear error.
 
 # ---------------------------------------------------------------------------
 # [approvals] — interactive approval behaviour
@@ -21,10 +21,8 @@ timeout_ms = 30000
 #
 #   "passthrough" (default) — send `ask` so Claude Code surfaces its own TUI
 #                             prompt regardless of the session's permission mode.
-#   "deny"                  — automatically deny with a reason; prevents Claude
-#                             from silently retrying alternative approaches.
-#   "allow"                 — automatically allow; useful on trusted machines
-#                             where you just want a notification log.
+#   "deny"                  — automatically deny with a reason.
+#   "allow"                 — automatically allow.
 fallback = "passthrough"
 
 # ---------------------------------------------------------------------------
@@ -52,8 +50,6 @@ urgency = "critical"
 [emit.notify.turn_done]
 enabled       = true
 # How long after Stop the user must remain idle before the notif fires.
-# Tune up if you find yourself getting notifications immediately after
-# Claude finishes (e.g. you're typing the next prompt within a second).
 idle_grace_ms = 10000
 # How long the notification stays on screen, in milliseconds.
 # 0 = let the notification daemon decide; -1 = persistent.

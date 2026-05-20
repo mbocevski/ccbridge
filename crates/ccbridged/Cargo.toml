@@ -15,11 +15,6 @@ path = "src/lib.rs"
 name = "ccbridged"
 path = "src/main.rs"
 
-# Feature flags
-# -------------
-# ble — BLE bridge support.  Enabled by default; pass --no-default-features
-#       to skip BLE compilation (no controller, headless install, etc.).
-#       All other emit paths (notify, ctrl, http) are always on.
 [features]
 default = ["ble"]
 ble = []
@@ -33,46 +28,21 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-# DBus session-bus client for freedesktop notifications (tokio feature; default drops smol/async-io)
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-# StreamExt for zbus signal streams (already a transitive dep via zbus/futures-lite)
 futures-lite = "2"
-# JSONL tail filesystem watcher (daemon-specific, not shared via workspace)
 notify = "6"
-# Glob matching for permission patterns (e.g. Read(**/.env*))
 globset = "0.4"
-# Lock-free shared allowlist — Phase 2b hot-reload
 arc-swap = "1"
-# Local time for daily reset (daemon-specific)
 time = { version = "0.3", features = ["local-offset", "macros", "formatting"] }
-# Signal Type=notify readiness to systemd. Tiny crate, no transitives.
 sd-notify = "0.4"
-# TOML config file parser
 toml = "0.8"
-# LRU cache for ProjectAllowlistCache (bounds inotify watcher growth)
 lru = "0.18"
-# HTTP /status endpoint for waybar custom modules
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
-
-# ---------------------------------------------------------------------------
-# Debian packaging (cargo-deb)
-# ---------------------------------------------------------------------------
-# Build command (no-build assumes `cargo build --release --workspace --locked`
-# has already run):
-#
-#   cargo install cargo-deb
-#   cargo build --release --workspace --locked
-#   cargo deb -p ccbridged --target x86_64-unknown-linux-gnu --no-build
-#
-# Output: target/x86_64-unknown-linux-gnu/debian/ccbridge_<version>_amd64.deb
-#
-# Asset paths are relative to this crate root (crates/ccbridged/).
-# ../../ resolves to the workspace/repo root.
 
 [package.metadata.deb]
 name = "ccbridge"
@@ -85,20 +55,14 @@ machine and surfaces approval prompts through your freedesktop notification
 daemon and a bidirectional control socket."""
 section = "utils"
 priority = "optional"
-# `$auto` resolves to whatever shared libraries the binary actually links
-# against (libc, etc.).  We do NOT need libsystemd — sd-notify(0.4) is
-# pure userspace, just writes to $NOTIFY_SOCKET.
 depends = "$auto"
 recommends = "swaync | mako-notifier | dunst | notification-daemon"
 maintainer-scripts = "../../debian/maintainer-scripts/"
-# Asset paths resolve relative to this manifest's directory
-# (crates/ccbridged/), so binaries in the workspace target/ need ../../.
 assets = [
     ["../../target/release/ccbridged",              "usr/bin/",                                        "755"],
     ["../../target/release/ccbridge-hook",          "usr/bin/",                                        "755"],
     ["../../contrib/systemd/ccbridge.service",      "usr/lib/systemd/user/ccbridge.service",           "644"],
     ["../../README.md",                             "usr/share/doc/ccbridge/README.md",                "644"],
-    ["../../docs/control-protocol.md",              "usr/share/doc/ccbridge/control-protocol.md",      "644"],
     ["../../docs/example-config.toml",              "usr/share/doc/ccbridge/example-config.toml",      "644"],
     ["../../LICENSE",                               "usr/share/doc/ccbridge/copyright",                "644"],
 ]

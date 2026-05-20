@@ -508,7 +508,7 @@ async fn jsonl_tokens_reflected_in_heartbeat() {
 }
 
 // ---------------------------------------------------------------------------
-// K1: AllowlistAlways end-to-end
+// AllowlistAlways end-to-end
 // ---------------------------------------------------------------------------
 
 /// Full Always path:
@@ -594,9 +594,9 @@ async fn allowlist_always_writes_pattern_and_approves() {
     );
 
     // ── Assert settings.local.json created with derived pattern ───────────────
-    // The write happens on the aggregator task — fsync chain (G1) means
-    // it can land later than expected on slow disks. Poll for the file
-    // rather than guessing a fixed sleep budget.
+    // The write happens on the aggregator task; the fsync chain in
+    // save_settings can land later than expected on slow disks, so
+    // poll for the file rather than guessing a fixed sleep budget.
     let local = project_dir
         .path()
         .join(".claude")
@@ -614,7 +614,7 @@ async fn allowlist_always_writes_pattern_and_approves() {
 }
 
 // ---------------------------------------------------------------------------
-// J2: symlinked .claude must be rejected as a project-root marker
+// symlinked .claude must be rejected as a project-root marker
 // ---------------------------------------------------------------------------
 
 /// A `.claude` directory that is a symlink (even to a real dir) must NOT
@@ -799,7 +799,7 @@ async fn heartbeat_lists_prompts_for_parallel_sessions() {
 }
 
 // ---------------------------------------------------------------------------
-// K2a: expired id ctrl decision doesn't hang
+// expired id ctrl decision doesn't hang
 // ---------------------------------------------------------------------------
 
 /// Sending a permission decision for an unknown tool_use_id must be acked
@@ -835,7 +835,7 @@ async fn expired_id_ctrl_decision_returns_ack() {
 }
 
 // ---------------------------------------------------------------------------
-// K2b: simulate command returns unknown_command ack
+// simulate command returns unknown_command ack
 // ---------------------------------------------------------------------------
 
 /// `{"cmd":"simulate",...}` over ctrl must be acked with `ok:false` since

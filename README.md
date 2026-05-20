@@ -50,10 +50,8 @@ config is left untouched whenever it exists.
 Pre-built `.deb` packages are published from CI to a signed apt repo
 hosted on GitHub Pages.  Two channels are available:
 
-- **stable** — published on every `v*` git tag.  Install this if you
-  just want it to work.
-- **beta** — published on every push to `main`.  Install this if you
-  want the latest fixes faster than tags ship.
+- **stable** — published on every `v*` git tag.
+- **beta** — published on every push to `main`.
 
 One-time setup (adds the signing key and the apt source):
 
@@ -158,7 +156,7 @@ To approve or deny a pending tool call:
 {"cmd": "permission", "id": "<tool_use_id>", "decision": "deny"}
 ```
 
-Full protocol reference: [docs/control-protocol.md](docs/control-protocol.md).
+The wire format mirrors the BLE Nordic UART hardware-bridge protocol so any client that can speak newline-delimited JSON can subscribe. Protocol types live in `crates/ccbridge-proto/src/ctrl.rs` and `buddy.rs`.
 
 ## Waybar integration
 
@@ -194,10 +192,9 @@ daemon.
 
 ## Configuration
 
-ccbridge reads `$XDG_CONFIG_HOME/ccbridge/config.toml`
-(defaults to `~/.config/ccbridge/config.toml`).
-See [docs/example-config.toml](docs/example-config.toml) for the full
-reference with all knobs and their defaults. The most likely things to tune:
+ccbridge reads `$XDG_CONFIG_HOME/ccbridge/config.toml`.  See
+[docs/example-config.toml](docs/example-config.toml) for the full
+reference.
 
 | Key | Default | What it does |
 |-----|---------|--------------|
@@ -227,9 +224,6 @@ journalctl --user -u ccbridge -f
 ccbridged setup
 ```
 
-Safe to run repeatedly: missing hooks are added; existing entries are not
-modified.
-
 **Daemon not starting?** Verify the package and unit are in place:
 
 ```sh
@@ -249,15 +243,15 @@ journalctl --user -u ccbridge | grep "reloaded allowlist"
 If the line never appears, restart the daemon manually:
 `systemctl --user restart ccbridge`.
 
-**Claude Code broken after installing ccbridge?** That should not happen — the
-hook binary exits 0 silently on any error. If you suspect a regression, remove
-the `hooks` key from `~/.claude/settings.json` and file an issue.
+**Claude Code misbehaving after installing ccbridge?** The hook binary exits
+0 silently on any error, so the daemon should never break Claude Code.  If
+you suspect a regression, remove the `hooks` key from
+`~/.claude/settings.json` and file an issue.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT.  See [LICENSE](LICENSE).
 
 ## Contributing
 
-Open an issue or pull request. This is a personal project without a formal
-contributor process; reasonable patches welcome.
+Open an issue or pull request.

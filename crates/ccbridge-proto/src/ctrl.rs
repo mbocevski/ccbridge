@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MIT
 //! Control-socket protocol types.
 //!
-//! `$XDG_RUNTIME_DIR/ccbridge/ctrl.sock` is the stable, bidirectional
-//! interface for any client that wants to read ccbridge state or send commands.
-//! It is **the** integration point for future TUI/GUI/CLI work.
+//! `$XDG_RUNTIME_DIR/ccbridge/ctrl.sock` is the bidirectional interface for
+//! clients that want to read ccbridge state or send commands.
 //!
 //! **Framing:** newline-delimited JSON (one object per line, UTF-8).
-//! Mirrors the BLE NUS wire format where message types overlap, so a future
-//! TUI can share parsers with ESP32 firmware.
+//! Mirrors the BLE NUS wire format where message types overlap.
 //!
 //! # Connection lifecycle
 //!

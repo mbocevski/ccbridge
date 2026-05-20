@@ -6,27 +6,15 @@
 //! response, and writes that response to stdout.
 //!
 //! **Reliability invariant:** any error (socket absent, connect refused,
-//! read/write failure, timeout) → exit 0 with no output.  Daemon-down ≠
-//! Claude Code breaks.  The hook is intentionally fail-silent.
+//! read/write failure, timeout) → exit 0 with no output.
 
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// Timeout for connecting to and reading from the daemon socket.
-///
-/// The daemon controls the actual approval wait; this timeout only needs to
-/// outlive it.  60 s is generous but harmless — Claude Code will have already
-/// handled the event long before this fires in the normal case.
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Wall-clock budget for reading the event line from stdin.
-///
-/// Claude Code closes stdin promptly after writing the line, so this fires
-/// only when something upstream is broken (test harness left stdin open,
-/// PTY misbehaviour).  Without this cap the hook would wedge forever and
-/// stall whatever process is waiting on it.
 const STDIN_TIMEOUT_DEFAULT: Duration = Duration::from_secs(5);
 
 /// Maximum bytes accepted on stdin.  Mirrors the daemon's per-line cap so

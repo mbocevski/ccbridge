@@ -1,14 +1,8 @@
 [Unit]
 Description=ccbridge — Claude Code hook aggregator
 Documentation=https://github.com/mbocevski/ccbridge
-# Order after the graphical session so freedesktop notifications + the
-# session DBus broker are up before we connect.  PartOf binds our
-# lifecycle to the session — logging out stops ccbridge.
 After=graphical-session.target
 PartOf=graphical-session.target
-# Limit restart attempts: at most 5 restarts within 60s to avoid thrashing
-# on persistent config errors.  These directives belong in [Unit], not
-# [Service] — they were silently ignored in the old layout.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -18,13 +12,8 @@ ExecStart=/usr/bin/ccbridged
 Restart=on-failure
 RestartSec=5
 
-# Watchdog: ccbridged pings every WatchdogSec/2 by round-tripping
-# through the aggregator, so a wedged tokio runtime or stalled
-# aggregator task is detected and restarted.  60s is loose enough to
-# tolerate a busy system without false positives.
 WatchdogSec=60s
 
-# Socket directory: $XDG_RUNTIME_DIR/ccbridge/ (created + cleaned up by systemd)
 RuntimeDirectory=ccbridge
 RuntimeDirectoryMode=0700
 
