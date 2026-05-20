@@ -254,10 +254,14 @@ fn default_true() -> bool {
 /// Priority:
 /// 1. `$XDG_CONFIG_HOME/ccbridge/config.toml`
 /// 2. `$HOME/.config/ccbridge/config.toml`
-pub fn config_path() -> PathBuf {
-    crate::util::xdg_config_dir()
+///
+/// Returns `Err` when neither variable is set — the daemon refuses to fall
+/// back to `/.config/...` since that would silently read or write under the
+/// filesystem root on a misconfigured system.
+pub fn config_path() -> Result<PathBuf> {
+    Ok(crate::util::xdg_config_dir()?
         .join("ccbridge")
-        .join("config.toml")
+        .join("config.toml"))
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +274,7 @@ impl Config {
     /// Returns `Err` if the file exists but cannot be parsed — typos in user
     /// config are never silently swallowed.
     pub fn load() -> Result<Self> {
-        Self::load_from(&config_path())
+        Self::load_from(&config_path()?)
     }
 
     /// Load from an explicit path.
@@ -490,7 +494,7 @@ timeout_ms = 10000
     #[test]
     fn config_path_ends_with_expected_suffix() {
         // We can't safely mutate env in parallel tests — just verify the shape.
-        let p = config_path();
+        let p = config_path().expect("HOME or XDG_CONFIG_HOME set in test env");
         assert!(
             p.ends_with("ccbridge/config.toml"),
             "unexpected config path: {}",

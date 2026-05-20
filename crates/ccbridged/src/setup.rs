@@ -227,7 +227,7 @@ pub fn merge_hooks(settings: &mut Value) -> anyhow::Result<Vec<HookMergeResult>>
 }
 
 /// Return a human-readable JSON type name for error messages.
-fn json_type_name(v: &Value) -> &'static str {
+pub(crate) fn json_type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
         Value::Bool(_) => "boolean",

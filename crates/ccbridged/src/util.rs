@@ -20,14 +20,16 @@ pub fn xdg_state_dir() -> Result<PathBuf> {
 
 /// Resolve `$XDG_CONFIG_HOME` or fall back to `$HOME/.config`.
 ///
-/// Unlike `xdg_state_dir`, falls back to `/` rather than erroring when
-/// `$HOME` is also unset — mirrors the existing `config_path()` behaviour.
-pub fn xdg_config_dir() -> PathBuf {
+/// Returns `Err` when neither variable is set (misconfigured system), matching
+/// the behaviour of [`xdg_state_dir`].
+pub fn xdg_config_dir() -> Result<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg);
+        return Ok(PathBuf::from(xdg));
     }
-    let home = std::env::var_os("HOME").unwrap_or_else(|| std::ffi::OsString::from("/"));
-    PathBuf::from(home).join(".config")
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".config"));
+    }
+    anyhow::bail!("neither $XDG_CONFIG_HOME nor $HOME is set");
 }
 
 /// Truncate a session/tool-use id to its first 6 characters for log lines
@@ -49,7 +51,7 @@ mod tests {
 
     #[test]
     fn xdg_config_dir_succeeds_in_test_env() {
-        let dir = xdg_config_dir();
+        let dir = xdg_config_dir().expect("xdg_config_dir should succeed");
         assert!(dir.ends_with(".config") || std::env::var_os("XDG_CONFIG_HOME").is_some());
     }
 

@@ -7,6 +7,10 @@ Type=notify
 ExecStart=/usr/bin/ccbridged
 Restart=on-failure
 RestartSec=5
+# Limit restart attempts: at most 5 restarts within 60s to avoid thrashing
+# on persistent config errors.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 # Socket directory: $XDG_RUNTIME_DIR/ccbridge/ (created + cleaned up by systemd)
 RuntimeDirectory=ccbridge

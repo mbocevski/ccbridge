@@ -47,4 +47,10 @@ package() {
 
     install -Dm644 README.md \
         "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+    install -Dm644 docs/example-config.toml \
+        "$pkgdir/usr/share/doc/$pkgname/example-config.toml"
+
+    install -Dm644 docs/control-protocol.md \
+        "$pkgdir/usr/share/doc/$pkgname/control-protocol.md"
 }

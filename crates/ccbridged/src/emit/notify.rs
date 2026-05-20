@@ -189,6 +189,11 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
     let mut dismissed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_prompt_id: Option<String> = None;
 
+    // First-stale-click feedback: after a daemon restart, an orphaned swaync
+    // action click arrives for an id we don't recognise.  Post a one-time info
+    // notification explaining what happened so the user isn't confused.
+    let mut first_stale_click_seen = false;
+
     // The replaces_id we pass on the next Notify call.  Starts at 0 ("no
     // replacement").  After the first successful notify we keep it as the
     // last issued ID so new prompts replace rather than stack.
@@ -229,6 +234,7 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
                                 args.id,
                                 &args.action_key,
                                 &mut active,
+                                &mut first_stale_click_seen,
                             ).await;
                         }
                     }
@@ -429,9 +435,10 @@ async fn handle_action(
     notif_id: u32,
     action_key: &str,
     active: &mut HashMap<u32, String>,
+    first_stale_click_seen: &mut bool,
 ) {
     // Stale-click guard: if this notif_id isn't in our map it's from a previous
-    // prompt that we already handled or replaced.  Ignore silently.
+    // prompt that we already handled or replaced (e.g. after a daemon restart).
     let tool_use_id = match active.remove(&notif_id) {
         Some(id) => id,
         None => {
@@ -439,6 +446,29 @@ async fn handle_action(
                 notif_id,
                 action_key, "notify: ActionInvoked for unknown/stale notification — ignoring",
             );
+            // On first stale click after startup, post a one-time info
+            // notification so the user knows to re-trigger their action.
+            if !*first_stale_click_seen {
+                *first_stale_click_seen = true;
+                let mut hints = HashMap::new();
+                hints.insert(
+                    "urgency",
+                    zbus::zvariant::Value::U8(1), // normal urgency
+                );
+                let _ = proxy
+                    .notify(
+                        "ccbridge",
+                        0,
+                        "",
+                        "ccbridge restarted",
+                        "Please re-trigger the action you were approving. \
+                         The previous approval window expired when the daemon restarted.",
+                        &[],
+                        &hints,
+                        5000,
+                    )
+                    .await;
+            }
             return;
         }
     };

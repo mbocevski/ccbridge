@@ -119,7 +119,8 @@ async fn accept_loop(runtime_dir: PathBuf, agg_tx: AggregatorTx) -> Result<()> {
 /// Handle one hook connection: read event → send to aggregator → write response.
 async fn handle_connection(stream: UnixStream, agg_tx: mpsc::Sender<AggregatorMsg>) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    // Cap reads at 1 MiB — a hook event can't legitimately be larger.
+    let mut reader = BufReader::new(tokio::io::AsyncReadExt::take(reader, 1 << 20));
 
     // --- 1. Read one JSON line ---
     let mut line = String::new();

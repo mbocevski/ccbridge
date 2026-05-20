@@ -82,11 +82,14 @@ pub fn spawn(
 /// Must be called after the tokio runtime is started (uses
 /// `tokio::process::Command`).
 pub async fn resolve_owner() -> String {
-    // Try git config user.name
-    if let Ok(output) = tokio::process::Command::new("git")
-        .args(["config", "user.name"])
-        .output()
-        .await
+    // Try git config user.name with a 5s timeout.
+    if let Ok(Ok(output)) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new("git")
+            .args(["config", "user.name"])
+            .output(),
+    )
+    .await
     {
         if output.status.success() {
             let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -179,7 +182,8 @@ async fn handle_connection(
     tz_offset_secs: i32,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    // Cap reads at 1 MiB per line — malformed or malicious input won't OOM the daemon.
+    let mut reader = BufReader::new(tokio::io::AsyncReadExt::take(reader, 1 << 20));
 
     // --- 1. Send HelloMessage ---
     let hello = build_hello(owner, tz_offset_secs);

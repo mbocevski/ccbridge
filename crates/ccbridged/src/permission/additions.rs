@@ -194,11 +194,26 @@ pub fn write_allow_pattern(
         .with_context(|| format!("read {}", settings_path.display()))?;
 
     // Ensure settings["permissions"]["allow"] exists and is an array.
-    let allow_arr = settings
+    // Guard against non-object root (e.g. corrupted settings file).
+    if !settings.is_object() {
+        anyhow::bail!(
+            "settings file {} has unexpected root shape (expected JSON object, got {})",
+            settings_path.display(),
+            crate::setup::json_type_name(&settings),
+        );
+    }
+    let perms = settings
         .as_object_mut()
         .unwrap()
         .entry("permissions")
-        .or_insert_with(|| serde_json::json!({}))
+        .or_insert_with(|| serde_json::json!({}));
+    if !perms.is_object() {
+        anyhow::bail!(
+            "settings file {} has unexpected shape at .permissions (expected object)",
+            settings_path.display(),
+        );
+    }
+    let allow_arr = perms
         .as_object_mut()
         .unwrap()
         .entry("allow")
