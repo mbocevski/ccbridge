@@ -220,7 +220,12 @@ pub fn write_allow_pattern(
         .or_insert_with(|| serde_json::json!([]));
 
     if !allow_arr.is_array() {
-        *allow_arr = serde_json::json!([]);
+        anyhow::bail!(
+            "settings file {} has unexpected shape at .permissions.allow \
+             (expected array, got {})",
+            settings_path.display(),
+            crate::setup::json_type_name(allow_arr),
+        );
     }
 
     let arr = allow_arr.as_array_mut().unwrap();
@@ -908,6 +913,56 @@ mod tests {
             log.contains("Read(/tmp/file.txt)"),
             "audit log must contain the pattern"
         );
+    }
+
+    #[test]
+    fn write_allow_pattern_bails_when_allow_is_string() {
+        // User wrote `"allow": "Bash(...)"` instead of an array. Earlier
+        // versions silently clobbered this with `[]`. We must refuse and
+        // preserve the file.
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings_path = claude_dir.join("settings.local.json");
+        let original = r#"{"permissions":{"allow":"Bash(git status)"}}"#;
+        std::fs::write(&settings_path, original).unwrap();
+        let audit = dir.path().join("audit.log");
+
+        let target = WriteTarget {
+            root: dir.path().to_path_buf(),
+        };
+        let err = write_allow_pattern(&target, "Bash(echo hi)", &audit, meta()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(".permissions.allow") && msg.contains("string"),
+            "error must point at .permissions.allow and name the actual type, got: {msg}"
+        );
+        let on_disk = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(on_disk, original, "settings file must be untouched on error");
+    }
+
+    #[test]
+    fn write_allow_pattern_bails_when_allow_is_null() {
+        // `"allow": null` — same data-loss footgun as the string case.
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings_path = claude_dir.join("settings.local.json");
+        let original = r#"{"permissions":{"allow":null}}"#;
+        std::fs::write(&settings_path, original).unwrap();
+        let audit = dir.path().join("audit.log");
+
+        let target = WriteTarget {
+            root: dir.path().to_path_buf(),
+        };
+        let err = write_allow_pattern(&target, "Bash(echo hi)", &audit, meta()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(".permissions.allow") && msg.contains("null"),
+            "error must point at .permissions.allow and name the actual type, got: {msg}"
+        );
+        let on_disk = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(on_disk, original, "settings file must be untouched on error");
     }
 
     // -----------------------------------------------------------------------

@@ -159,9 +159,11 @@ pub fn merge_hooks(settings: &mut Value) -> anyhow::Result<Vec<HookMergeResult>>
         *settings = json!({});
     }
 
-    // Validate `settings.hooks` shape: if present it must be an object.
+    // Validate `settings.hooks` shape: if present it must be an object or null.
+    // null is treated as absent (replaced with {}) — it's JSON's natural way
+    // to represent "not set yet".
     if let Some(existing_hooks) = settings.get("hooks") {
-        if !existing_hooks.is_object() {
+        if !existing_hooks.is_object() && !existing_hooks.is_null() {
             anyhow::bail!(
                 "~/.claude/settings.json has an unexpected shape at .hooks \
                  (expected object, got {}) — please clean it up manually before \
@@ -169,6 +171,13 @@ pub fn merge_hooks(settings: &mut Value) -> anyhow::Result<Vec<HookMergeResult>>
                 json_type_name(existing_hooks)
             );
         }
+    }
+    // Overwrite null with {} so the entry() call below works correctly.
+    if settings.get("hooks").map(|v| v.is_null()).unwrap_or(false) {
+        settings
+            .as_object_mut()
+            .unwrap()
+            .insert("hooks".to_owned(), json!({}));
     }
 
     // Ensure `settings.hooks` is an object.
@@ -181,9 +190,11 @@ pub fn merge_hooks(settings: &mut Value) -> anyhow::Result<Vec<HookMergeResult>>
     let mut results = Vec::new();
 
     for &event in HOOK_EVENTS {
-        // Validate per-event shape: if present it must be an array.
+        // Validate per-event shape: if present it must be an array or null.
+        // null is treated as absent (same as "not set yet"); string/number/
+        // object are genuinely unexpected and rejected.
         if let Some(existing_arr) = hooks_obj.get(event) {
-            if !existing_arr.is_array() {
+            if !existing_arr.is_array() && !existing_arr.is_null() {
                 anyhow::bail!(
                     "~/.claude/settings.json has an unexpected shape at .hooks.{event} \
                      (expected array, got {}) — please clean it up manually before \
@@ -191,6 +202,13 @@ pub fn merge_hooks(settings: &mut Value) -> anyhow::Result<Vec<HookMergeResult>>
                     json_type_name(existing_arr)
                 );
             }
+        }
+        // Overwrite null with [] so entry().or_insert_with works correctly.
+        if hooks_obj.get(event).map(|v| v.is_null()).unwrap_or(false) {
+            hooks_obj
+                .as_object_mut()
+                .unwrap()
+                .insert(event.to_owned(), json!([]));
         }
 
         // Ensure `settings.hooks.<event>` is an array (creates it if absent).
@@ -670,5 +688,46 @@ mod tests {
             err.to_string().contains("object"),
             "error must name the actual type, got: {err}"
         );
+    }
+
+    #[test]
+    fn merge_hooks_treats_null_hooks_as_absent() {
+        // `{"hooks": null}` must be treated as absent and populated with all events.
+        let mut s = json!({"hooks": null});
+        let results = merge_hooks(&mut s).unwrap();
+        assert_eq!(results.len(), HOOK_EVENTS.len());
+        // All events must be Added (null treated as if the key didn't exist).
+        for r in &results {
+            assert_eq!(
+                r.action,
+                HookAction::Added,
+                "event {} must be Added when hooks:null",
+                r.event
+            );
+        }
+        // The .hooks field must now be an object.
+        assert!(
+            s["hooks"].is_object(),
+            ".hooks must be an object after merge, got: {}",
+            s["hooks"]
+        );
+    }
+
+    #[test]
+    fn merge_hooks_treats_null_event_as_absent() {
+        // `{"hooks": {"PreToolUse": null}}` — null event is treated as absent,
+        // must end up with the ccbridge entry added.
+        let mut s = json!({"hooks": {"PreToolUse": null}});
+        let results = merge_hooks(&mut s).unwrap();
+        // Find the PreToolUse result.
+        let ptu = results.iter().find(|r| r.event == "PreToolUse").unwrap();
+        assert_eq!(
+            ptu.action,
+            HookAction::Added,
+            "PreToolUse must be Added when its value is null"
+        );
+        let arr = s["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "PreToolUse must have exactly one group after merge");
+        assert_eq!(arr[0]["hooks"][0]["command"], HOOK_COMMAND);
     }
 }
