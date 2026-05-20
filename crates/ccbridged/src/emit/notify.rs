@@ -190,8 +190,14 @@ async fn run(agg_tx: AggregatorTx, mut hb_rx: broadcast::Receiver<Heartbeat>) ->
     let mut last_prompt_id: Option<String> = None;
 
     // First-stale-click feedback: after a daemon restart, an orphaned swaync
-    // action click arrives for an id we don't recognise.  Post a one-time info
+    // action click arrives for an id we don't recognise.  Post a one-time
     // notification explaining what happened so the user isn't confused.
+    //
+    // The flag's lifetime is the lifetime of this `run` task — i.e. one
+    // daemon process.  It resets on every daemon restart, which is exactly
+    // the right scope: the "ccbridge restarted" notification should fire
+    // once per restart, not once per process lifetime of the user's
+    // notification daemon.
     let mut first_stale_click_seen = false;
 
     // The replaces_id we pass on the next Notify call.  Starts at 0 ("no

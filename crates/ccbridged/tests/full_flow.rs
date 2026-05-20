@@ -39,8 +39,12 @@ use ccbridged::state::{
 // ---------------------------------------------------------------------------
 
 struct FullSetup {
-    /// Kept alive so the tempdir isn't deleted while the test runs.
-    _dir: TempDir,
+    /// Holds the tempdir alive for the duration of the test.
+    /// The leading underscore is intentional — Rust treats `_keep_dir` as
+    /// "intentionally unused" so it doesn't trigger dead-code lints, but
+    /// the descriptive name signals "removing this will break the test"
+    /// to anyone tempted to clean it up.
+    _keep_dir: TempDir,
     /// `$XDG_RUNTIME_DIR` — contains `ccbridge/hooks.sock` and `ccbridge/ctrl.sock`.
     pub runtime_dir: PathBuf,
     /// Fake `~/.claude/projects/` directory for JSONL files.
@@ -95,7 +99,7 @@ async fn setup_full(approval_timeout: Duration) -> FullSetup {
     wait_for_socket(&ccbridge_dir.join("ctrl.sock"), Duration::from_secs(5)).await;
 
     FullSetup {
-        _dir: dir,
+        _keep_dir: dir,
         runtime_dir,
         projects_dir,
         agg_tx,
@@ -751,8 +755,22 @@ async fn expired_id_ctrl_decision_returns_ack() {
         .await
         .expect("ack must arrive within 2s");
     assert_eq!(ack.ack, "permission", "ack must name the command");
-    // ok may be false (unknown id) — just verify no hang and no panic.
-    // The daemon logs a warn but the ctrl client sees a clean ack.
+    // Document the current ack-shape: the ctrl handler optimistically
+    // returns ok:true for permission cmds without round-tripping through
+    // the aggregator. The aggregator logs a warn for unknown ids but
+    // doesn't propagate that back to ctrl. This may change later (a
+    // follow-up could plumb a one-shot result back so unknown ids ack
+    // ok:false with an error). Until then, pin the current behaviour
+    // so a regression that swallows or panics on unknown ids is caught.
+    assert!(
+        ack.ok,
+        "current ctrl behaviour: permission ack is ok:true even for \
+         unknown ids (aggregator logs warn but doesn't reply); got: {ack:?}",
+    );
+    assert!(
+        ack.error.is_none(),
+        "no error in body when ok:true; got: {ack:?}",
+    );
 }
 
 // ---------------------------------------------------------------------------

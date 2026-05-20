@@ -177,7 +177,7 @@ where
 /// Non-PreToolUse events receive no output (passthrough).
 #[tokio::test]
 async fn stop_event_passthrough() {
-    let (_dir, _agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let stop = json!({
@@ -201,7 +201,7 @@ async fn stop_event_passthrough() {
 /// PreToolUse followed by a permission decision produces the right JSON.
 #[tokio::test]
 async fn pre_tool_use_allow_decision() {
-    let (_dir, agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
+    let (_keep_dir, agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let pre_tool_use = json!({
@@ -250,7 +250,7 @@ async fn pre_tool_use_allow_decision() {
 /// PreToolUse with a Deny decision.
 #[tokio::test]
 async fn pre_tool_use_deny_decision() {
-    let (_dir, agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
+    let (_keep_dir, agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let pre_tool_use = json!({
@@ -295,7 +295,7 @@ async fn pre_tool_use_deny_decision() {
 #[tokio::test]
 async fn pre_tool_use_timeout_sends_ask() {
     // Use a very short timeout so the test doesn't take 30 s.
-    let (_dir, _agg_tx, runtime_dir) = setup(Duration::from_millis(50)).await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup(Duration::from_millis(50)).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let pre_tool_use = json!({
@@ -329,7 +329,7 @@ async fn pre_tool_use_timeout_sends_ask() {
 /// (swaync, ctrl) see prompt:None / waiting:0 on the next heartbeat.
 #[tokio::test]
 async fn pre_tool_use_timeout_clears_aggregator_state() {
-    let (_dir, agg_tx, runtime_dir) = setup(Duration::from_millis(50)).await;
+    let (_keep_dir, agg_tx, runtime_dir) = setup(Duration::from_millis(50)).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let pre_tool_use = json!({
@@ -378,7 +378,7 @@ async fn pre_tool_use_timeout_clears_aggregator_state() {
 /// Malformed JSON input → connection closes cleanly, no panic.
 #[tokio::test]
 async fn malformed_json_closes_cleanly() {
-    let (_dir, _agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     writer.write_all(b"not valid JSON at all\n").await.unwrap();
@@ -392,7 +392,7 @@ async fn malformed_json_closes_cleanly() {
 /// Aggregator mpsc dropped mid-flight → hook connection closes cleanly.
 #[tokio::test]
 async fn aggregator_gone_closes_cleanly() {
-    let (_dir, agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
+    let (_keep_dir, agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     // Drop the aggregator tx — the daemon is "shutting down".
@@ -419,7 +419,7 @@ async fn aggregator_gone_closes_cleanly() {
 /// Verify WireDecision::Once → PermissionDecision::Allow mapping explicitly.
 #[tokio::test]
 async fn wire_once_maps_to_allow() {
-    let (_dir, agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
+    let (_keep_dir, agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     send_line(
@@ -455,7 +455,7 @@ async fn wire_once_maps_to_allow() {
 /// Unknown hook_event_name (forward-compat) produces no output.
 #[tokio::test]
 async fn unknown_hook_event_passthrough() {
-    let (_dir, _agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup(DEFAULT_APPROVAL_TIMEOUT).await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     send_line(

@@ -44,7 +44,14 @@ fn stdin_timeout() -> Duration {
 
 fn main() {
     // Any error anywhere → exit 0 with no output (passthrough semantics).
-    let _ = run();
+    // run() handles Ok/Err via Option<()>, but a panic would still
+    // terminate with exit code 101 by default — Claude Code would see
+    // a non-zero exit and surface it to the user. Replace the hook with
+    // a no-op silent exit so a panic also passes through cleanly.
+    std::panic::set_hook(Box::new(|_| {
+        // Intentionally empty — exit_silently below handles the exit.
+    }));
+    let _ = std::panic::catch_unwind(run);
 }
 
 fn run() -> Option<()> {

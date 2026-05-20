@@ -51,10 +51,33 @@ async fn setup() -> (TempDir, ccbridged::state::AggregatorTx, PathBuf) {
         0, // UTC offset — deterministic in tests
     );
 
-    // Give the accept loop a moment to bind.
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Probe until the listener is bound — replaces a 20ms bind sleep that
+    // raced on busy CI runners.
+    wait_for_socket(&ctrl_sock_path(&runtime_dir), Duration::from_secs(5)).await;
 
     (dir, agg_tx, runtime_dir)
+}
+
+/// Poll connect() against `path` until it succeeds or the deadline expires.
+/// The accept loop binds the inode before it's ready to accept, so existence
+/// alone is not enough — actually probe.
+async fn wait_for_socket(path: &Path, deadline: Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        if path.exists() {
+            if let Ok(s) = UnixStream::connect(path).await {
+                drop(s);
+                return;
+            }
+        }
+        if start.elapsed() >= deadline {
+            panic!(
+                "socket {} not accepting connections within {deadline:?}",
+                path.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 fn ctrl_sock_path(runtime_dir: &Path) -> PathBuf {
@@ -99,7 +122,7 @@ async fn write_json<T: serde::Serialize>(writer: &mut tokio::net::unix::OwnedWri
 /// current heartbeat snapshot.
 #[tokio::test]
 async fn connect_receives_hello_and_snapshot() {
-    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup().await;
     let (mut reader, _writer) = connect(&runtime_dir).await;
 
     // Line 1: HelloMessage
@@ -122,7 +145,7 @@ async fn connect_receives_hello_and_snapshot() {
 /// `{"cmd":"subscribe","topics":["heartbeat"]}` receives `{"ack":"subscribe","ok":true}`.
 #[tokio::test]
 async fn subscribe_heartbeat_acked() {
-    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     // Consume hello + snapshot.
@@ -144,7 +167,7 @@ async fn subscribe_heartbeat_acked() {
 /// `{"cmd":"unsubscribe","topics":["heartbeat"]}` receives `{"ack":"unsubscribe","ok":true}`.
 #[tokio::test]
 async fn unsubscribe_acked() {
-    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let _: serde_json::Value = read_json(&mut reader).await;
@@ -166,7 +189,7 @@ async fn unsubscribe_acked() {
 /// oneshot fires with the correct `WireDecision`.
 #[tokio::test]
 async fn permission_command_resolves_approval() {
-    let (_dir, agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     // Consume hello + snapshot.
@@ -233,7 +256,7 @@ async fn permission_command_resolves_approval() {
 /// `{"cmd":"status"}` returns a StatusAck with name="ccbridge".
 #[tokio::test]
 async fn status_command_returns_status_ack() {
-    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let _: serde_json::Value = read_json(&mut reader).await;
@@ -254,7 +277,7 @@ async fn status_command_returns_status_ack() {
 /// `{"cmd":"replay","n":5}` returns `{"ack":"replay","ok":false,"error":"unknown_command"}`.
 #[tokio::test]
 async fn replay_returns_unknown_command() {
-    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let _: serde_json::Value = read_json(&mut reader).await;
@@ -271,7 +294,7 @@ async fn replay_returns_unknown_command() {
 /// `{"cmd":"forget_device","addr":"AA:BB:CC:DD:EE:FF"}` → unknown_command until BLE lands.
 #[tokio::test]
 async fn forget_device_returns_unknown_command() {
-    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let _: serde_json::Value = read_json(&mut reader).await;
@@ -292,7 +315,7 @@ async fn forget_device_returns_unknown_command() {
 /// A completely unknown `cmd` string also gets a proper `unknown_command` ack.
 #[tokio::test]
 async fn completely_unknown_cmd_returns_unknown_command() {
-    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let _: serde_json::Value = read_json(&mut reader).await;
@@ -313,7 +336,7 @@ async fn completely_unknown_cmd_returns_unknown_command() {
 /// Subscribed client receives a streamed heartbeat when state changes.
 #[tokio::test]
 async fn subscribed_client_receives_heartbeats() {
-    let (_dir, agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     let _: serde_json::Value = read_json(&mut reader).await; // hello
@@ -367,69 +390,92 @@ async fn subscribed_client_receives_heartbeats() {
 /// After unsubscribing from heartbeat, subsequent state changes must NOT
 /// deliver heartbeats to that client.
 ///
-/// This tests the subscribe/unsubscribe symmetry: a client that unsubscribes
-/// should get the ack, then silence — even if other clients are receiving
-/// the same heartbeats.
+/// Uses a still-subscribed second client as a positive synchronisation
+/// marker rather than a fixed sleep: the test waits for the heartbeat to
+/// land on B (proving the daemon emitted it), then asserts A's pipe has
+/// no pending data. That's stronger than "we waited 300 ms and nothing
+/// arrived" — a busy CI runner could miss both delivery windows.
 #[tokio::test]
 async fn unsubscribe_stops_heartbeat_delivery() {
-    let (_dir, agg_tx, runtime_dir) = setup().await;
-    let (mut reader, mut writer) = connect(&runtime_dir).await;
+    let (_keep_dir, agg_tx, runtime_dir) = setup().await;
 
-    // Consume hello + initial snapshot.
-    let _: serde_json::Value = read_json(&mut reader).await;
-    let _: serde_json::Value = read_json(&mut reader).await;
+    // Client A — will subscribe then unsubscribe.
+    let (mut a_r, mut a_w) = connect(&runtime_dir).await;
+    let _: serde_json::Value = read_json(&mut a_r).await; // hello
+    let _: serde_json::Value = read_json(&mut a_r).await; // initial snapshot
 
-    // Subscribe to heartbeats.
-    write_json(
-        &mut writer,
-        &serde_json::json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
-    )
-    .await;
-    let ack: Ack = read_json(&mut reader).await;
-    assert!(ack.ok, "subscribe ack must be ok");
+    // Client B — stays subscribed throughout, used as a positive marker.
+    let (mut b_r, mut b_w) = connect(&runtime_dir).await;
+    let _: serde_json::Value = read_json(&mut b_r).await;
+    let _: serde_json::Value = read_json(&mut b_r).await;
 
-    // Trigger a state change — a heartbeat should arrive.
+    for w in [&mut a_w, &mut b_w] {
+        write_json(
+            w,
+            &serde_json::json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+        )
+        .await;
+    }
+    let ack_a: Ack = read_json(&mut a_r).await;
+    let ack_b: Ack = read_json(&mut b_r).await;
+    assert!(ack_a.ok && ack_b.ok, "both subscribe acks must be ok");
+
+    // Trigger a state change — both clients should receive the heartbeat.
     agg_tx
         .send(AggregatorMsg::AddEntry {
             text: "before-unsub".to_owned(),
         })
         .await
         .unwrap();
-    let hb = tokio::time::timeout(Duration::from_secs(1), async {
-        let hb: Heartbeat = read_json(&mut reader).await;
-        hb
-    })
-    .await
-    .expect("heartbeat must arrive after subscribing");
-    let _ = hb; // consumed
+    let hb_a: Heartbeat = read_json(&mut a_r).await;
+    let hb_b: Heartbeat = read_json(&mut b_r).await;
+    assert!(
+        hb_a.entries.iter().any(|e| e.contains("before-unsub")),
+        "A must receive the pre-unsub heartbeat: {hb_a:?}",
+    );
+    assert!(
+        hb_b.entries.iter().any(|e| e.contains("before-unsub")),
+        "B must receive the pre-unsub heartbeat: {hb_b:?}",
+    );
 
-    // Now unsubscribe.
+    // A unsubscribes; B remains.
     write_json(
-        &mut writer,
+        &mut a_w,
         &serde_json::json!({"cmd": "unsubscribe", "topics": ["heartbeat"]}),
     )
     .await;
-    let ack: Ack = read_json(&mut reader).await;
+    let ack: Ack = read_json(&mut a_r).await;
     assert!(ack.ok, "unsubscribe ack must be ok");
 
-    // Trigger another state change — this time NO heartbeat should arrive.
+    // Trigger another state change. B (still subscribed) is our positive
+    // marker — once B has received the next heartbeat, the daemon has
+    // demonstrably emitted it; A has had its chance to receive it too.
     agg_tx
         .send(AggregatorMsg::AddEntry {
             text: "after-unsub".to_owned(),
         })
         .await
         .unwrap();
+    let hb_b_after: Heartbeat = tokio::time::timeout(Duration::from_secs(2), read_json(&mut b_r))
+        .await
+        .expect("B must receive the post-unsub heartbeat");
+    assert!(
+        hb_b_after.entries.iter().any(|e| e.contains("after-unsub")),
+        "B must observe the after-unsub entry: {hb_b_after:?}",
+    );
 
-    let no_hb = tokio::time::timeout(Duration::from_millis(300), async {
+    // Now poll A — it must have nothing pending. A short timeout is fine
+    // here because if the daemon was going to deliver it would have done so
+    // before B's heartbeat (same broadcast, same scheduler frame).
+    let stray = tokio::time::timeout(Duration::from_millis(50), async {
         let mut line = String::new();
-        reader.read_line(&mut line).await.expect("read line");
+        a_r.read_line(&mut line).await.expect("read_line");
         line
     })
     .await;
-
     assert!(
-        no_hb.is_err(),
-        "after unsubscribe, no heartbeat should arrive within 300ms"
+        stray.is_err(),
+        "A must not receive a heartbeat after unsubscribing, got: {stray:?}",
     );
 }
 
@@ -437,7 +483,7 @@ async fn unsubscribe_stops_heartbeat_delivery() {
 /// The daemon must stay up and accept new connections afterward.
 #[tokio::test]
 async fn oversized_line_drops_connection_cleanly() {
-    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (_keep_dir, _agg_tx, runtime_dir) = setup().await;
     let (mut reader, mut writer) = connect(&runtime_dir).await;
 
     // Drain hello + snapshot.

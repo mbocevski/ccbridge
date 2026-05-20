@@ -381,12 +381,28 @@ impl Aggregator {
             "no sessions".to_owned()
         };
 
+        let entries: Vec<String> = self.entries.iter().cloned().collect();
+
+        // Defensive observability: entries should be non-empty whenever a
+        // session has been seen.  An empty entries Vec with total > 0 means
+        // the transcript-line plumbing is broken upstream — log at debug so
+        // we have a breadcrumb, but don't fail the snapshot.  Demote to
+        // tracing/debug to keep noise out of normal operation.
+        if entries.is_empty() && total > 0 {
+            tracing::debug!(
+                total,
+                running,
+                waiting,
+                "snapshot: entries empty despite total > 0 — transcript plumbing may be broken",
+            );
+        }
+
         Heartbeat {
             total,
             running,
             waiting,
             msg,
-            entries: self.entries.iter().cloned().collect(),
+            entries,
             tokens: self.tokens.cumulative,
             tokens_today: self.tokens.today,
             prompt,
