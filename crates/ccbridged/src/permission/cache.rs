@@ -16,8 +16,10 @@
 //!
 //! The cache is capped at [`LRU_CAPACITY`] entries.  Each entry holds two
 //! inotify watchers (project and local settings files); evicting an entry
-//! explicitly aborts both tasks to release the inotify fds promptly rather
-//! than waiting for them to self-terminate.
+//! calls `.abort()` on both watcher tasks.  The tokio task cancellation is
+//! observed at the next `.await` point inside the watcher's poll loop (max
+//! ~50ms), at which time the inotify fd is released as part of dropping the
+//! task's local state.
 //!
 //! # Precondition
 //!

@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -175,9 +176,23 @@ pub fn parse_jsonl_line(line: &str) -> Option<ParsedAssistantLine> {
 // File offset tracker
 // ---------------------------------------------------------------------------
 
-/// Tracks the last-read byte offset for each watched JSONL file.
+/// Per-file tracking entry: byte offset plus the (dev, inode) identity at the
+/// time of the last read.  When the identity changes (atomic replace via
+/// tmp+rename), the offset is reset to 0 so the new file is read from the
+/// beginning rather than seeking past valid data.
+#[derive(Debug, Clone)]
+struct FileOffsetEntry {
+    offset: u64,
+    dev: u64,
+    inode: u64,
+}
+
+/// Tracks the last-read byte offset for each watched JSONL file, keyed by
+/// path.  Includes `(dev, inode)` identity tracking so that atomic-write
+/// replacements (tmp+rename, backup/sync tools) are detected and the offset
+/// is reset rather than seeking past the new file's content.
 pub struct FileOffsets {
-    inner: HashMap<PathBuf, u64>,
+    inner: HashMap<PathBuf, FileOffsetEntry>,
 }
 
 impl Default for FileOffsets {
@@ -199,9 +214,13 @@ impl FileOffsets {
     pub fn snapshot_existing(&mut self, projects_dir: &Path) {
         let walker = walkdir_jsonl(projects_dir);
         for path in walker {
-            match std::fs::metadata(&path).map(|m| m.len()) {
-                Ok(len) => {
-                    self.inner.entry(path).or_insert(len);
+            match std::fs::metadata(&path) {
+                Ok(meta) => {
+                    self.inner.entry(path).or_insert(FileOffsetEntry {
+                        offset: meta.len(),
+                        dev: meta.dev(),
+                        inode: meta.ino(),
+                    });
                 }
                 Err(e) => {
                     warn!("jsonl: stat {} failed: {e}", path.display());
@@ -213,19 +232,53 @@ impl FileOffsets {
     /// Read new lines from `path` since the last recorded offset.
     /// Calls `on_line` for each new line (with trailing `\r?\n` stripped).
     ///
+    /// If the file's `(dev, inode)` has changed since the last read (atomic
+    /// replacement), the offset is reset to 0 so the new file is read from
+    /// the beginning.
+    ///
     /// Uses [`BufRead::read_line`] rather than [`BufRead::lines`] so that the
     /// raw byte count (including the newline bytes) is used to advance the
     /// offset — this correctly handles files whose last line has no trailing
     /// newline, and avoids the `lines() + 1` off-by-one that would occur in
     /// that case.
     pub fn drain_new_lines(&mut self, path: &Path, mut on_line: impl FnMut(&str)) {
-        let offset = self.inner.entry(path.to_path_buf()).or_insert(0);
         match std::fs::File::open(path) {
             Err(e) => {
                 warn!("jsonl: open {} failed: {e}", path.display());
             }
             Ok(mut file) => {
-                if let Err(e) = file.seek(SeekFrom::Start(*offset)) {
+                // Stat the open file to get its identity and check for replacement.
+                let meta = match file.metadata() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!("jsonl: fstat {} failed: {e}", path.display());
+                        return;
+                    }
+                };
+                let current_dev = meta.dev();
+                let current_ino = meta.ino();
+
+                let entry = self
+                    .inner
+                    .entry(path.to_path_buf())
+                    .or_insert(FileOffsetEntry {
+                        offset: 0,
+                        dev: current_dev,
+                        inode: current_ino,
+                    });
+
+                // Reset offset if (dev, inode) changed — file was atomically replaced.
+                if entry.dev != current_dev || entry.inode != current_ino {
+                    debug!(
+                        path = %path.display(),
+                        "jsonl: file identity changed (atomic replace?) — resetting offset to 0",
+                    );
+                    entry.offset = 0;
+                    entry.dev = current_dev;
+                    entry.inode = current_ino;
+                }
+
+                if let Err(e) = file.seek(SeekFrom::Start(entry.offset)) {
                     warn!("jsonl: seek {} failed: {e}", path.display());
                     return;
                 }
@@ -247,7 +300,7 @@ impl FileOffsets {
                         }
                     }
                 }
-                *offset += bytes_read;
+                entry.offset += bytes_read;
             }
         }
     }
@@ -900,6 +953,39 @@ mod tests {
             p.ends_with("ccbridge/tokens.json"),
             "unexpected path: {}",
             p.display()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // I2: inode tracking regression test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn file_offsets_resets_on_atomic_replace() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.jsonl");
+
+        // Write v1 and record the offset.
+        std::fs::write(&file_path, "line1\nline2\n").unwrap();
+        let mut offsets = FileOffsets::new();
+        let mut lines_v1: Vec<String> = Vec::new();
+        offsets.drain_new_lines(&file_path, |l| lines_v1.push(l.to_owned()));
+        assert_eq!(lines_v1, vec!["line1", "line2"], "v1 lines must be read");
+        // Offset is now at end of v1.
+
+        // Atomically replace file via tmp+rename (simulates backup tool / our own save_settings).
+        let tmp = dir.path().join("test.jsonl.tmp");
+        std::fs::write(&tmp, "line3\n").unwrap();
+        std::fs::rename(&tmp, &file_path).unwrap();
+
+        // drain_new_lines must detect the inode change and reset offset to 0.
+        let mut lines_v2: Vec<String> = Vec::new();
+        offsets.drain_new_lines(&file_path, |l| lines_v2.push(l.to_owned()));
+        assert_eq!(
+            lines_v2,
+            vec!["line3"],
+            "after atomic replace, new file must be read from start"
         );
     }
 }

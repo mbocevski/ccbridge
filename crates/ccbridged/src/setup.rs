@@ -72,7 +72,8 @@ fn do_setup() -> Result<()> {
     let mut settings = load_settings(&settings_path)
         .with_context(|| format!("reading {}", settings_path.display()))?;
 
-    let results = merge_hooks(&mut settings);
+    let results = merge_hooks(&mut settings)
+        .with_context(|| format!("merging hooks into {}", settings_path.display()))?;
     save_settings(&settings_path, &settings)
         .with_context(|| format!("writing {}", settings_path.display()))?;
 
@@ -122,6 +123,7 @@ fn do_setup() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Result of processing one hook event during `merge_hooks`.
+#[derive(Debug)]
 pub struct HookMergeResult {
     pub event: &'static str,
     pub action: HookAction,
@@ -144,10 +146,29 @@ pub enum HookAction {
 ///
 /// All other keys in `settings`, and all other hook groups within an event,
 /// are left completely unchanged.
-pub fn merge_hooks(settings: &mut Value) -> Vec<HookMergeResult> {
+///
+/// # Errors
+///
+/// Returns `Err` if `settings.hooks` exists but is not an object, or if any
+/// `settings.hooks.<event>` value exists but is not an array.  These shapes
+/// indicate user-authored config that ccbridge cannot safely modify; the user
+/// must clean up the file manually before running setup.
+pub fn merge_hooks(settings: &mut Value) -> anyhow::Result<Vec<HookMergeResult>> {
     // Ensure settings is an object.
     if !settings.is_object() {
         *settings = json!({});
+    }
+
+    // Validate `settings.hooks` shape: if present it must be an object.
+    if let Some(existing_hooks) = settings.get("hooks") {
+        if !existing_hooks.is_object() {
+            anyhow::bail!(
+                "~/.claude/settings.json has an unexpected shape at .hooks \
+                 (expected object, got {}) — please clean it up manually before \
+                 running setup, or rename the file to start fresh",
+                json_type_name(existing_hooks)
+            );
+        }
     }
 
     // Ensure `settings.hooks` is an object.
@@ -156,22 +177,28 @@ pub fn merge_hooks(settings: &mut Value) -> Vec<HookMergeResult> {
         .unwrap()
         .entry("hooks")
         .or_insert_with(|| json!({}));
-    if !hooks_obj.is_object() {
-        *hooks_obj = json!({});
-    }
 
     let mut results = Vec::new();
 
     for &event in HOOK_EVENTS {
-        // Ensure `settings.hooks.<event>` is an array.
+        // Validate per-event shape: if present it must be an array.
+        if let Some(existing_arr) = hooks_obj.get(event) {
+            if !existing_arr.is_array() {
+                anyhow::bail!(
+                    "~/.claude/settings.json has an unexpected shape at .hooks.{event} \
+                     (expected array, got {}) — please clean it up manually before \
+                     running setup, or rename the file to start fresh",
+                    json_type_name(existing_arr)
+                );
+            }
+        }
+
+        // Ensure `settings.hooks.<event>` is an array (creates it if absent).
         let event_arr = hooks_obj
             .as_object_mut()
             .unwrap()
             .entry(event)
             .or_insert_with(|| json!([]));
-        if !event_arr.is_array() {
-            *event_arr = json!([]);
-        }
 
         // Scan existing groups for a ccbridge-hook entry.
         let already = event_arr
@@ -196,7 +223,19 @@ pub fn merge_hooks(settings: &mut Value) -> Vec<HookMergeResult> {
         }
     }
 
-    results
+    Ok(results)
+}
+
+/// Return a human-readable JSON type name for error messages.
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Return `true` if this hook group contains at least one entry with
@@ -384,7 +423,7 @@ mod tests {
     #[test]
     fn merge_empty_settings() {
         let mut s = json!({});
-        let results = merge_hooks(&mut s);
+        let results = merge_hooks(&mut s).unwrap();
         assert_eq!(results.len(), HOOK_EVENTS.len());
         all_added(&results);
 
@@ -404,7 +443,7 @@ mod tests {
             "tui": "fullscreen",
             "env": {"SOME_VAR": "1"}
         });
-        let results = merge_hooks(&mut s);
+        let results = merge_hooks(&mut s).unwrap();
         all_added(&results);
 
         // Unrelated keys must survive.
@@ -417,9 +456,9 @@ mod tests {
     fn merge_idempotent() {
         let mut s = json!({});
         // Run once → adds all.
-        merge_hooks(&mut s);
+        merge_hooks(&mut s).unwrap();
         // Run again → all already present.
-        let results = merge_hooks(&mut s);
+        let results = merge_hooks(&mut s).unwrap();
         all_present(&results);
         // No duplicate groups.
         for event in HOOK_EVENTS {
@@ -441,7 +480,7 @@ mod tests {
                 ]
             }
         });
-        let results = merge_hooks(&mut s);
+        let results = merge_hooks(&mut s).unwrap();
         assert_eq!(results.len(), HOOK_EVENTS.len());
         let pre = results.iter().find(|r| r.event == "PreToolUse").unwrap();
         assert_eq!(pre.action, HookAction::AlreadyPresent);
@@ -469,7 +508,7 @@ mod tests {
                 ]
             }
         });
-        let results = merge_hooks(&mut s);
+        let results = merge_hooks(&mut s).unwrap();
 
         let pre = results.iter().find(|r| r.event == "PreToolUse").unwrap();
         assert_eq!(pre.action, HookAction::Added, "should append our group");
@@ -493,7 +532,7 @@ mod tests {
                 "Idle": [{"hooks": [{"type": "command", "command": "idle-handler"}]}]
             }
         });
-        merge_hooks(&mut s);
+        merge_hooks(&mut s).unwrap();
 
         let idle = s["hooks"]["Idle"].as_array().unwrap();
         assert_eq!(idle.len(), 1);
@@ -517,7 +556,7 @@ mod tests {
             "enabledPlugins": ["foo", "bar"],
             "tui": "fullscreen"
         });
-        let results = merge_hooks(&mut s);
+        let results = merge_hooks(&mut s).unwrap();
         assert_eq!(results.len(), HOOK_EVENTS.len());
 
         // All hook events added.
@@ -564,7 +603,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nested").join("settings.json");
         let mut s = json!({"theme": "dark", "hooks": {}});
-        merge_hooks(&mut s);
+        merge_hooks(&mut s).unwrap();
         save_settings(&path, &s).unwrap();
         let loaded = load_settings(&path).unwrap();
         // All 7 events present after round-trip.
@@ -589,9 +628,47 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("settings.json");
         let mut s = load_settings(&path).unwrap();
-        let results = merge_hooks(&mut s);
+        let results = merge_hooks(&mut s).unwrap();
         save_settings(&path, &s).unwrap();
         // If we got here without panicking / exiting, the flow is correct.
         assert_eq!(results.len(), HOOK_EVENTS.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // I3: shape validation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_hooks_rejects_non_object_hooks() {
+        // .hooks is a string — not an object.
+        let mut s = json!({"hooks": "invalid_string"});
+        let err = merge_hooks(&mut s).unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected shape"),
+            "error must mention unexpected shape, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("string"),
+            "error must name the actual type, got: {err}"
+        );
+    }
+
+    #[test]
+    fn merge_hooks_rejects_non_array_event_value() {
+        // .hooks.PreToolUse is an object, not an array.
+        let mut s = json!({"hooks": {"PreToolUse": {"foo": "bar"}}});
+        let err = merge_hooks(&mut s).unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected shape"),
+            "error must mention unexpected shape, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("PreToolUse"),
+            "error must name the problematic event, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("object"),
+            "error must name the actual type, got: {err}"
+        );
     }
 }
