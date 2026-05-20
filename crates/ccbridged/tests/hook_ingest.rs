@@ -88,6 +88,38 @@ async fn recv_line(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> O
     )
 }
 
+/// Read one line with a generous wall-clock deadline. Returns `Ok(Some(line))`
+/// on data, `Ok(None)` on EOF, `Err(_)` on deadline exceeded.
+///
+/// Use this when waiting for an event whose timing is bounded but not exact
+/// (e.g. an approval timeout firing) — better than a fixed `sleep(N)` then
+/// `recv_line`, which races on busy CI runners.
+async fn recv_line_within(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    deadline: Duration,
+) -> Result<Option<String>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(deadline, recv_line(reader)).await
+}
+
+/// Poll a closure until it returns `Some(_)` or the deadline expires.
+/// Returns `Ok(value)` on success, `Err(())` on timeout.
+async fn poll_until<T, F, Fut>(deadline: Duration, mut f: F) -> Result<T, ()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(v) = f().await {
+            return Ok(v);
+        }
+        if start.elapsed() >= deadline {
+            return Err(());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -227,12 +259,12 @@ async fn pre_tool_use_timeout_sends_ask() {
     });
     send_line(&mut writer, &pre_tool_use).await;
 
-    // Wait longer than the timeout.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    // Must receive an "ask" decision — not EOF.
-    let line = recv_line(&mut reader)
+    // Wait for the response (timeout fires at 50ms; give 2s of CI headroom).
+    // Predicate-driven, not sleep-driven — busy runner can't shift the
+    // deadline past the read window.
+    let line = recv_line_within(&mut reader, Duration::from_secs(2))
         .await
+        .expect("timeout response must arrive within deadline")
         .expect("timeout must produce an 'ask' response, not EOF");
     let v: serde_json::Value = serde_json::from_str(&line).expect("must be valid JSON");
     assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "ask");
@@ -261,22 +293,30 @@ async fn pre_tool_use_timeout_clears_aggregator_state() {
     });
     send_line(&mut writer, &pre_tool_use).await;
 
-    // Wait for the timeout to fire and the Ask response to arrive.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    let _line = recv_line(&mut reader)
+    // Wait for the Ask response to arrive (data-driven, not sleep-driven).
+    let _line = recv_line_within(&mut reader, Duration::from_secs(2))
         .await
+        .expect("timeout response must arrive within deadline")
         .expect("should get ask response");
 
-    // Give the ApprovalTimedOut message time to be processed by the aggregator.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Query the aggregator: prompt must be gone.
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    agg_tx
-        .send(ccbridged::state::AggregatorMsg::GetHeartbeat { respond: tx })
-        .await
-        .unwrap();
-    let hb = rx.await.unwrap();
+    // Poll the aggregator until pending state has been cleared. The
+    // ApprovalTimedOut message is processed asynchronously after the response
+    // is sent, so the clear is racy w.r.t. the read above on busy runners.
+    let agg_tx_q = agg_tx.clone();
+    let hb = poll_until(Duration::from_secs(2), || {
+        let agg_tx = agg_tx_q.clone();
+        async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            agg_tx
+                .send(ccbridged::state::AggregatorMsg::GetHeartbeat { respond: tx })
+                .await
+                .ok()?;
+            let hb = rx.await.ok()?;
+            (hb.waiting == 0 && hb.prompt.is_none()).then_some(hb)
+        }
+    })
+    .await
+    .expect("aggregator must clear pending state within deadline");
     assert_eq!(hb.waiting, 0, "waiting must be 0 after timeout");
     assert!(
         hb.prompt.is_none(),
