@@ -549,6 +549,22 @@ impl Aggregator {
         respond: oneshot::Sender<HookOutcome>,
         annotation: Option<crate::permission::PatternAnnotation>,
     ) {
+        // Guard against duplicate tool_use_ids across sessions.  Claude Code
+        // generates globally-unique IDs within a session, but two concurrent
+        // sessions could theoretically collide.  Overwriting the existing entry
+        // would silently contaminate the first session's approval flow; instead,
+        // fall through to Claude's own TUI for the second call.
+        if self.pending.contains_key(&e.tool_use_id) {
+            warn!(
+                tool_use_id = %e.tool_use_id,
+                new_session = %e.base.session_id,
+                "duplicate tool_use_id in start_intercept — \
+                 dropping new approval, falling through to Claude TUI",
+            );
+            let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
+            return;
+        }
+
         let hint = format_tool_hint(&e.tool_input);
         debug!(
             session_id = %e.base.session_id,
@@ -625,9 +641,15 @@ impl Aggregator {
         let event = match self.pending.get(&tool_use_id) {
             Some((_, approval)) => (*approval.event).clone(),
             None => {
+                // The approval was already resolved before the Always click
+                // arrived — either the timeout fired and Claude's TUI handled
+                // it, or another emitter (ctrl socket, BLE) sent a decision
+                // first.  Nothing to write; the user should re-trigger if they
+                // still want an Always entry.
                 warn!(
                     tool_use_id = %tool_use_id,
-                    "AllowlistAlways: no pending approval found; ignoring",
+                    "AllowlistAlways: approval already resolved \
+                     (timeout fired or another emitter decided) — nothing to write",
                 );
                 return;
             }
@@ -1192,6 +1214,47 @@ mod tests {
     fn allowlist_always_unknown_tool_use_id_no_panic() {
         let mut agg = new_agg();
         agg.handle_allowlist_always("toolu_nonexistent".to_owned());
+    }
+
+    #[test]
+    fn duplicate_tool_use_id_doesnt_corrupt_state() {
+        // Two PreToolUse events with the same tool_use_id (from different sessions)
+        // must not overwrite the first session's pending entry. The second call
+        // should fall through to Claude's TUI (Passthrough) and the first session's
+        // pending state must be unaffected.
+        let mut agg = new_agg();
+
+        let (tx0, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess1"), tx0);
+        let (tx1, _) = oneshot::channel();
+        agg.handle_hook_event(session_start_event("sess2"), tx1);
+
+        // First session registers the approval.
+        let (r1_tx, mut r1_rx) = oneshot::channel();
+        agg.handle_hook_event(pre_tool_use_event("sess1", "toolu_dup", "Bash"), r1_tx);
+        assert!(matches!(
+            r1_rx.try_recv().unwrap(),
+            HookOutcome::Await { .. }
+        ));
+        assert!(agg.pending.contains_key("toolu_dup"));
+
+        // Second session sends the SAME tool_use_id — must get Passthrough.
+        let (r2_tx, mut r2_rx) = oneshot::channel();
+        agg.handle_hook_event(pre_tool_use_event("sess2", "toolu_dup", "Bash"), r2_tx);
+        assert!(
+            matches!(
+                r2_rx.try_recv().unwrap(),
+                HookOutcome::Immediate(HookResponse::Passthrough)
+            ),
+            "duplicate tool_use_id must fall through to Claude TUI"
+        );
+
+        // First session's entry must still be intact.
+        assert!(
+            agg.pending.contains_key("toolu_dup"),
+            "first session pending entry must survive duplicate attempt"
+        );
+        assert_eq!(agg.snapshot().waiting, 1, "waiting count must still be 1");
     }
 
     #[test]

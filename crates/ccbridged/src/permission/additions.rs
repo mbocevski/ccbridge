@@ -515,6 +515,15 @@ impl AuditEntry {
 ///
 /// Legacy 7-col TSV: `{ts}\t{op}\t{pattern}\t{tool_use_id}\t{session}\t{agent}\t{target}`
 /// Legacy 6-col TSV: same without the target column → `AuditTarget::UserGlobal`.
+///
+/// # Re-Always after undo correctness
+///
+/// When the same `(pattern, tool_use_id)` pair appears in the log as:
+///   `added → undone → added`
+/// the second `added` is the most-recent un-undone entry and must be returned.
+/// We use a `HashMap<key, usize>` counter instead of a `HashSet`: walking in
+/// reverse, `undone` increments the counter and `added` decrements it — the
+/// first `added` whose counter is already 0 is the un-undone one.
 fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
     if !log_path.exists() {
         return Ok(None);
@@ -522,9 +531,10 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
     let text = std::fs::read_to_string(log_path)
         .with_context(|| format!("read {}", log_path.display()))?;
 
-    // Walk lines in reverse; collect "added" entries and their subsequent undos.
-    let mut undone_keys: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
+    // Walk lines in reverse.  `undo_counts` maps (pattern, tool_use_id) →
+    // number of subsequent `undone` lines seen so far (reverse order).
+    let mut undo_counts: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
     let mut result: Option<AuditEntry> = None;
 
     for line in text.lines().rev() {
@@ -557,11 +567,19 @@ fn find_last_undone_addition(log_path: &Path) -> Result<Option<AuditEntry>> {
 
         match entry.op_str() {
             "undone" => {
-                undone_keys.insert(key);
+                *undo_counts.entry(key).or_insert(0) += 1;
             }
-            "added" if !undone_keys.contains(&key) => {
-                result = Some(entry);
-                break;
+            "added" => {
+                let count = undo_counts.entry(key.clone()).or_insert(0);
+                if *count > 0 {
+                    // This added is "balanced" by a subsequent undone — skip.
+                    *count -= 1;
+                } else {
+                    // No pending undone for this key — this is the most-recent
+                    // un-undone addition.
+                    result = Some(entry);
+                    break;
+                }
             }
             _ => {}
         }
@@ -1244,6 +1262,38 @@ mod tests {
         let entry = find_last_undone_addition(&audit).unwrap().expect("entry");
         assert_eq!(entry.pattern, "Bash(legacy)");
         assert!(matches!(entry.target, AuditTarget::UserGlobal));
+    }
+
+    #[test]
+    fn find_last_undone_addition_handles_re_always_after_undo() {
+        // Pattern X, tool_use_id A: added → undone → added (same id).
+        // The second `added` is un-undone and must be returned.
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+
+        let line = |op: &str, ts: &str| {
+            serde_json::json!({
+                "ts": ts,
+                "op": op,
+                "pattern": "Bash(test)",
+                "tool_use_id": "toolu_A",
+                "session_id": "abc",
+                "target": {"project_local": {"root": "/tmp/proj"}},
+            })
+        };
+        let log = format!(
+            "{}\n{}\n{}\n",
+            line("added", "2026-01-01T00:00:00Z"),
+            line("undone", "2026-01-01T00:00:01Z"),
+            line("added", "2026-01-01T00:00:02Z"),
+        );
+        std::fs::write(&audit, log).unwrap();
+
+        let entry = find_last_undone_addition(&audit)
+            .unwrap()
+            .expect("re-Always should surface as un-undone");
+        assert_eq!(entry.pattern, "Bash(test)");
+        assert_eq!(entry.op_str(), "added");
     }
 
     #[test]
