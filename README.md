@@ -1,5 +1,7 @@
 # ccbridge
 
+[![CI](https://github.com/mbocevski/ccbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/mbocevski/ccbridge/actions/workflows/ci.yml)
+
 ccbridge is a background daemon for Linux that hooks into Claude Code and
 aggregates state across all running sessions. When a tool call needs your
 approval, it surfaces a dismissable notification via swaync (or any

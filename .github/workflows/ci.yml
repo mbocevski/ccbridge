@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same ref when a new push lands —
+# saves runner minutes on rapid pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Strip default ambient permissions; each job opts into what it needs.
+permissions:
+  contents: read
+
+env:
+  # Surface compiler warnings as errors workspace-wide so a regression
+  # in lint hygiene fails the build instead of being merged silently.
+  RUSTFLAGS: "-D warnings"
+  CARGO_TERM_COLOR: always
+  # Disable incremental — slower locally, but on CI the fresh-build path
+  # is the common case and incremental adds disk + cache overhead with
+  # no benefit (caches are restored, not appended-to).
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stable-build
+      - run: cargo clippy --workspace --all-targets --all-features
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stable-build
+      - run: cargo build --workspace --all-features --tests --locked
+      # `--locked` above; tests don't need it (already built).
+      - run: cargo test --workspace --all-features
+
+  doc:
+    name: doc
+    runs-on: ubuntu-24.04
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stable-build
+          # `cargo doc` writes to a separate `doc/` subtree so it doesn't
+          # invalidate the build artefacts the test job needs.
+      - run: cargo doc --workspace --no-deps --all-features
