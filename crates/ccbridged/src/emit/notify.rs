@@ -617,7 +617,7 @@ async fn handle_turn_done(
     if !body.is_empty() {
         body.push('\n');
     }
-    body.push_str(&format!("{} tokens", evt.tokens_cumulative));
+    body.push_str(&format!("{} tokens", format_token_count(evt.tokens_cumulative)));
 
     let mut hints = HashMap::new();
     hints.insert(
@@ -869,6 +869,37 @@ async fn close_all(
 }
 
 // ---------------------------------------------------------------------------
+// Token count formatter
+// ---------------------------------------------------------------------------
+
+/// Format a token count compactly: `1.2k`, `184k`, `2.5M`.
+///
+/// The compact form is also a defence against notification daemons
+/// (swaync, dunst, …) that auto-detect long digit clusters as
+/// "OTP-like" and inject a "copy code" action button into the
+/// notification.  Splitting `1172` into `1.2k` defeats the heuristic
+/// and is easier to read on a compact display.
+fn format_token_count(n: u64) -> String {
+    const K: u64 = 1_000;
+    const M: u64 = 1_000_000;
+    if n < K {
+        // Three digits or fewer — no daemon flags this as a code.
+        n.to_string()
+    } else if n < 10 * K {
+        // 1.0k–9.9k: show one decimal.
+        format!("{:.1}k", n as f64 / K as f64)
+    } else if n < M {
+        // 10k–999k: integer thousands.
+        format!("{}k", n / K)
+    } else if n < 10 * M {
+        // 1.0M–9.9M.
+        format!("{:.1}M", n as f64 / M as f64)
+    } else {
+        format!("{}M", n / M)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Session context helpers
 // ---------------------------------------------------------------------------
 
@@ -1013,5 +1044,61 @@ mod tests {
     #[test]
     fn shorten_cwd_root_returns_slash() {
         assert_eq!(shorten_cwd_with_home("/", "/home/u"), "/");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_token_count
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_token_count_under_1k_uses_raw() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(42), "42");
+        assert_eq!(format_token_count(999), "999");
+    }
+
+    #[test]
+    fn format_token_count_thousands_uses_decimal_or_integer() {
+        // 1.0k–9.9k: one decimal digit.
+        assert_eq!(format_token_count(1_000), "1.0k");
+        assert_eq!(format_token_count(1_172), "1.2k");
+        assert_eq!(format_token_count(9_999), "10.0k");
+        // 10k–999k: integer.
+        assert_eq!(format_token_count(10_000), "10k");
+        assert_eq!(format_token_count(184_502), "184k");
+        assert_eq!(format_token_count(999_999), "999k");
+    }
+
+    #[test]
+    fn format_token_count_millions() {
+        assert_eq!(format_token_count(1_000_000), "1.0M");
+        assert_eq!(format_token_count(2_500_000), "2.5M");
+        assert_eq!(format_token_count(10_000_000), "10M");
+    }
+
+    #[test]
+    fn format_token_count_no_long_digit_runs() {
+        // The defence against the swaync "OTP detector": no compact
+        // representation should have 4+ consecutive digits (which is
+        // what the daemon's heuristic flags as a copyable code).
+        for n in [1_000_u64, 1_172, 9_999, 10_000, 184_502, 1_000_000] {
+            let s = format_token_count(n);
+            let max_run = s
+                .chars()
+                .fold((0_usize, 0_usize), |(cur, max), c| {
+                    if c.is_ascii_digit() {
+                        let cur = cur + 1;
+                        (cur, max.max(cur))
+                    } else {
+                        (0, max)
+                    }
+                })
+                .1;
+            assert!(
+                max_run <= 3,
+                "format_token_count({n}) = {s:?} has a {max_run}-digit run; \
+                 swaync's OTP heuristic may flag it",
+            );
+        }
     }
 }
