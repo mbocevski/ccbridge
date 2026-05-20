@@ -77,10 +77,14 @@ fn do_setup() -> Result<()> {
     save_settings(&settings_path, &settings)
         .with_context(|| format!("writing {}", settings_path.display()))?;
 
-    // --- 2. Enable systemd service ---
+    // --- 2. Write default config (only if absent) ---
+    let config_outcome = write_default_config_if_absent()
+        .context("writing default config.toml")?;
+
+    // --- 3. Enable systemd service ---
     let service_ok = run_enable_service();
 
-    // --- 3. Print summary ---
+    // --- 4. Print summary ---
     let mut added = Vec::new();
     let mut present = Vec::new();
     for r in &results {
@@ -102,6 +106,17 @@ fn do_setup() -> Result<()> {
             present.join(", ")
         );
     }
+    match &config_outcome {
+        ConfigAction::Created { path } => {
+            println!("ccbridged setup: wrote default config to {}", path.display());
+        }
+        ConfigAction::AlreadyPresent { path } => {
+            println!("ccbridged setup: config already present at {}", path.display());
+        }
+        ConfigAction::Skipped { reason } => {
+            println!("ccbridged setup: config not written ({reason})");
+        }
+    }
     println!(
         "ccbridged setup: service enabled: {}",
         if service_ok {
@@ -116,6 +131,76 @@ fn do_setup() -> Result<()> {
     );
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Default config.toml
+// ---------------------------------------------------------------------------
+
+/// The default config file content — `docs/example-config.toml` baked in
+/// at compile time so `ccbridged setup` doesn't depend on a runtime file
+/// next to the binary.
+const DEFAULT_CONFIG_TOML: &str = include_str!("../../../docs/example-config.toml");
+
+/// Outcome of [`write_default_config_if_absent`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConfigAction {
+    /// File didn't exist; we wrote the default.
+    Created { path: PathBuf },
+    /// File already exists; left untouched.
+    AlreadyPresent { path: PathBuf },
+    /// Config path could not be resolved (e.g. neither `XDG_CONFIG_HOME`
+    /// nor `HOME` set).  Setup shouldn't fail over this — the user can
+    /// still use the daemon with no config (defaults are baked in) — but
+    /// we surface the reason in the summary.
+    Skipped { reason: String },
+}
+
+/// Resolve the config path and write the default config there if absent.
+///
+/// Skips with a descriptive reason when the path can't be resolved
+/// (neither `XDG_CONFIG_HOME` nor `HOME` set — misconfigured system).
+pub fn write_default_config_if_absent() -> Result<ConfigAction> {
+    let path = match crate::config::config_path() {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ConfigAction::Skipped {
+                reason: format!("{e:#}"),
+            });
+        }
+    };
+    write_default_config_to(&path)
+}
+
+/// Write [`DEFAULT_CONFIG_TOML`] to `path`, but only if no file exists there.
+///
+/// Atomic write (tmp + rename) so a partial file can never be left behind
+/// by an interrupted setup.  Creates the parent directory if needed.
+///
+/// Split out from [`write_default_config_if_absent`] so tests can drive it
+/// against a tempdir without mutating `XDG_CONFIG_HOME` (which would race
+/// with parallel tests; see task 56 for the lesson learned).
+fn write_default_config_to(path: &Path) -> Result<ConfigAction> {
+    if path.exists() {
+        return Ok(ConfigAction::AlreadyPresent {
+            path: path.to_path_buf(),
+        });
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create_dir_all {}", parent.display()))?;
+    }
+
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, DEFAULT_CONFIG_TOML)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+
+    Ok(ConfigAction::Created {
+        path: path.to_path_buf(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -748,5 +833,71 @@ mod tests {
         let arr = s["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(arr.len(), 1, "PreToolUse must have exactly one group after merge");
         assert_eq!(arr[0]["hooks"][0]["command"], HOOK_COMMAND);
+    }
+
+    // -----------------------------------------------------------------------
+    // write_default_config_to
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_default_config_creates_file_when_absent() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ccbridge").join("config.toml");
+        assert!(!path.exists());
+
+        let outcome = write_default_config_to(&path).expect("write must succeed");
+        match outcome {
+            ConfigAction::Created { path: written_path } => {
+                assert_eq!(written_path, path);
+            }
+            other => panic!("expected Created, got {other:?}"),
+        }
+        assert!(path.exists());
+
+        // Content matches the bundled default verbatim.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, DEFAULT_CONFIG_TOML);
+    }
+
+    #[test]
+    fn write_default_config_skips_when_present() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let user_content = "# my custom config\n[approvals]\ntimeout_ms = 5000\n";
+        std::fs::write(&path, user_content).unwrap();
+
+        let outcome = write_default_config_to(&path).expect("must succeed");
+        assert!(
+            matches!(outcome, ConfigAction::AlreadyPresent { .. }),
+            "expected AlreadyPresent, got {outcome:?}"
+        );
+        // User content untouched — we never overwrite.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, user_content);
+    }
+
+    #[test]
+    fn write_default_config_creates_parent_dir() {
+        let dir = TempDir::new().unwrap();
+        // Two levels of parent dir don't exist yet.
+        let path = dir.path().join("a").join("b").join("config.toml");
+        assert!(!path.parent().unwrap().exists());
+
+        write_default_config_to(&path).expect("must succeed");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn bundled_default_config_parses_as_config() {
+        // The example-config.toml that ships with the binary must survive
+        // a Config::load_from round-trip — otherwise `setup` would write
+        // a file that the very next daemon start refuses to load with
+        // "deny_unknown_fields" or a parse error.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
+
+        crate::config::Config::load_from(&path)
+            .expect("bundled default config must parse cleanly");
     }
 }
