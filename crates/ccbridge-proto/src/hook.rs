@@ -99,7 +99,7 @@ pub enum SessionSource {
 /// Serialized with an internally-tagged `"hook_event_name"` discriminant so
 /// callers can match:
 ///
-/// ```rust,ignore
+/// ```text
 /// let event: HookEvent = serde_json::from_str(&stdin_line)?;
 /// match event {
 ///     HookEvent::PreToolUse(e) => { … }

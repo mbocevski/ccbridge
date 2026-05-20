@@ -1415,10 +1415,7 @@ mod tests {
         let (t0, _) = oneshot::channel();
         agg.handle_hook_event(session_start_event("sess-solo"), t0);
         let (r, _) = oneshot::channel();
-        agg.handle_hook_event(
-            pre_tool_use_event("sess-solo", "toolu_solo", "Bash"),
-            r,
-        );
+        agg.handle_hook_event(pre_tool_use_event("sess-solo", "toolu_solo", "Bash"), r);
 
         let hb = agg.snapshot();
         assert_eq!(hb.msg, "approve: Bash");
@@ -2076,8 +2073,7 @@ mod tests {
         .unwrap();
 
         // Wait past the grace deadline; no event must arrive.
-        let result =
-            tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
+        let result = tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
         assert!(
             result.is_err(),
             "turn-done must NOT fire when user submitted a follow-up; got {:?}",
@@ -2117,8 +2113,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result =
-            tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
+        let result = tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
         assert!(
             result.is_err(),
             "turn-done must NOT fire when Claude continued with a tool call; got {:?}",
@@ -2157,8 +2152,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result =
-            tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
+        let result = tokio::time::timeout(Duration::from_millis(400), td_rx.recv()).await;
         assert!(
             result.is_err(),
             "turn-done must NOT fire when a PostToolUse arrives during grace; got {:?}",
@@ -2186,8 +2180,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result =
-            tokio::time::timeout(Duration::from_millis(200), td_rx.recv()).await;
+        let result = tokio::time::timeout(Duration::from_millis(200), td_rx.recv()).await;
         assert!(
             result.is_err(),
             "turn-done must NOT fire when idle_grace is zero",

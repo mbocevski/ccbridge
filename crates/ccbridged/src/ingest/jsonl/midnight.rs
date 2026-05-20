@@ -37,7 +37,10 @@ pub fn spawn_midnight_reset(
             let sleep_dur = secs_until_next_local_midnight();
             tokio::time::sleep(sleep_dur).await;
 
-            if perform_midnight_reset(&state_path, &agg_tx).await.is_break() {
+            if perform_midnight_reset(&state_path, &agg_tx)
+                .await
+                .is_break()
+            {
                 break;
             }
         }

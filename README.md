@@ -22,12 +22,18 @@ makepkg -si
 ccbridged setup
 ```
 
-`ccbridged setup` is a one-shot, idempotent step that registers the
-`ccbridge-hook` binary in `~/.claude/settings.json` for the seven Claude Code
-hook events ccbridge listens to (PreToolUse, PostToolUse, UserPromptSubmit,
-Notification, Stop, SessionStart, SessionEnd), and enables the
-`ccbridge.service` systemd user unit. Re-running it when already configured
-is safe.
+`ccbridged setup` is a one-shot, idempotent step that:
+
+1. Registers the `ccbridge-hook` binary in `~/.claude/settings.json` for the
+   seven Claude Code hook events ccbridge listens to (PreToolUse, PostToolUse,
+   UserPromptSubmit, Notification, Stop, SessionStart, SessionEnd).
+2. Writes a default `~/.config/ccbridge/config.toml` if one doesn't already
+   exist — never overwrites a user-edited file.
+3. Enables the `ccbridge.service` systemd user unit.
+
+Re-running when already configured is safe: the settings file is left
+byte-for-byte unchanged when every hook is already registered, and the
+config is left untouched whenever it exists.
 
 ## What you'll see
 
@@ -53,6 +59,13 @@ the most-recently added pattern and restore the previous settings.
 If you ignore the notification, the approval timeout expires and Claude Code
 falls back to its own built-in TUI prompt (configurable — see `fallback` in
 Configuration below).
+
+When Claude finishes a response and you don't immediately follow up,
+ccbridge posts a low-key "Claude is done" notification (normal urgency,
+auto-expires after 5s, no action buttons). It only fires after a
+configurable idle window (10s by default) so a Stop emitted between tool
+calls in a multi-step task doesn't trigger one. Turn it off with
+`emit.notify.turn_done.enabled = false` in `config.toml`.
 
 ccbridge respects `permissions.allow` and `permissions.deny` entries from
 three files, cascaded in this order:
@@ -142,6 +155,8 @@ reference with all knobs and their defaults. The most likely things to tune:
 | `approvals.timeout_ms` | `30000` | ms to wait for a decision before falling back |
 | `approvals.fallback` | `"passthrough"` | `"passthrough"`, `"deny"`, or `"allow"` |
 | `emit.notify.enabled` | `true` | Enable freedesktop desktop notifications |
+| `emit.notify.turn_done.enabled` | `true` | Post "Claude is done" notification when a session has been idle after Stop |
+| `emit.notify.turn_done.idle_grace_ms` | `10000` | How long a session must be idle after Stop before the notification fires |
 | `emit.http.enabled` | `false` | Enable HTTP `/status` endpoint (Waybar) |
 | `emit.http.addr` | `"127.0.0.1:9876"` | Address for the HTTP endpoint |
 

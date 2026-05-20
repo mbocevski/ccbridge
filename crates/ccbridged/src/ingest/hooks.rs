@@ -11,7 +11,7 @@
 //!
 //! The daemon side:
 //! 1. Accepts the connection and spawns a task.
-//! 2. Reads one line, deserialises into [`HookEvent`].
+//! 2. Reads one line, deserialises into [`ccbridge_proto::hook::HookEvent`].
 //! 3. Sends [`AggregatorMsg::HookEvent`] to the aggregator.
 //! 4. Receives a [`HookResponse`] back via a oneshot channel.
 //! 5. Writes the response (or nothing) and closes.

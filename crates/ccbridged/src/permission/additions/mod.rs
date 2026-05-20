@@ -31,11 +31,11 @@
 //!
 //! # Module layout
 //!
-//! - [`derive`]    — pure logic: hook event → allowlist pattern.
-//! - [`target`]    — `WriteTarget` / `AuditTarget` and project-root resolution.
-//! - [`write`]     — write a pattern into settings.local.json + record audit.
-//! - [`undo`]      — `undo-last-allow` CLI dispatch + audit-root validation.
-//! - [`audit_log`] — JSONL on-disk format, append + reverse-walk.
+//! - `derive`    — pure logic: hook event → allowlist pattern.
+//! - `target`    — `WriteTarget` / `AuditTarget` and project-root resolution.
+//! - `write`     — write a pattern into settings.local.json + record audit.
+//! - `undo`      — `undo-last-allow` CLI dispatch + audit-root validation.
+//! - `audit_log` — JSONL on-disk format, append + reverse-walk.
 
 mod audit_log;
 mod derive;
@@ -337,7 +337,10 @@ mod tests {
             "error must point at .permissions.allow and name the actual type, got: {msg}"
         );
         let on_disk = std::fs::read_to_string(&settings_path).unwrap();
-        assert_eq!(on_disk, original, "settings file must be untouched on error");
+        assert_eq!(
+            on_disk, original,
+            "settings file must be untouched on error"
+        );
     }
 
     #[test]
@@ -361,7 +364,10 @@ mod tests {
             "error must point at .permissions.allow and name the actual type, got: {msg}"
         );
         let on_disk = std::fs::read_to_string(&settings_path).unwrap();
-        assert_eq!(on_disk, original, "settings file must be untouched on error");
+        assert_eq!(
+            on_disk, original,
+            "settings file must be untouched on error"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -510,10 +516,7 @@ mod tests {
     #[test]
     fn lexically_normalize_collapses_dot_and_parent() {
         let p = std::path::PathBuf::from("/a/b/c/./../d");
-        assert_eq!(
-            lexically_normalize(&p),
-            std::path::PathBuf::from("/a/b/d"),
-        );
+        assert_eq!(lexically_normalize(&p), std::path::PathBuf::from("/a/b/d"),);
 
         let p = std::path::PathBuf::from("/a/.");
         assert_eq!(lexically_normalize(&p), std::path::PathBuf::from("/a"));

@@ -91,9 +91,7 @@ where
             return;
         }
         if start.elapsed() >= deadline {
-            panic!(
-                "heartbeat predicate never satisfied within {deadline:?}; last: {hb:?}",
-            );
+            panic!("heartbeat predicate never satisfied within {deadline:?}; last: {hb:?}",);
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

@@ -28,12 +28,12 @@
 //!
 //! # Module layout
 //!
-//! - [`tokens`]   — `PersistedTokens` + `tokens_state_path`.
-//! - [`parse`]    — `parse_jsonl_line` + `ParsedAssistantLine`.
-//! - [`offsets`]  — `FileOffsets` (per-file byte tracking with inode identity).
-//! - [`dates`]    — date / midnight calendar math (no chrono dep).
-//! - [`watcher`]  — `spawn_watcher` + the run loop.
-//! - [`midnight`] — `spawn_midnight_reset` + the per-iteration helper.
+//! - `tokens`   — `PersistedTokens` + `tokens_state_path`.
+//! - `parse`    — `parse_jsonl_line` + `ParsedAssistantLine`.
+//! - `offsets`  — `FileOffsets` (per-file byte tracking with inode identity).
+//! - `dates`    — date / midnight calendar math (no chrono dep).
+//! - `watcher`  — `spawn_watcher` + the run loop.
+//! - `midnight` — `spawn_midnight_reset` + the per-iteration helper.
 
 mod dates;
 mod midnight;
@@ -319,7 +319,10 @@ mod tests {
             .await
             .unwrap();
         let hb = hrx.await.unwrap();
-        assert_eq!(hb.tokens, 184_502, "precondition: aggregator must hold 184_502");
+        assert_eq!(
+            hb.tokens, 184_502,
+            "precondition: aggregator must hold 184_502"
+        );
 
         // Run one reset iteration.
         let cf = perform_midnight_reset(&state_path, &agg_tx).await;

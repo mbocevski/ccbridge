@@ -14,7 +14,7 @@
 //!
 //! # LRU bound
 //!
-//! The cache is capped at [`LRU_CAPACITY`] entries.  Each entry holds two
+//! The cache is capped at `LRU_CAPACITY` entries.  Each entry holds two
 //! inotify watchers (project and local settings files); evicting an entry
 //! calls `.abort()` on both watcher tasks.  The tokio task cancellation is
 //! observed at the next `.await` point inside the watcher's poll loop (max

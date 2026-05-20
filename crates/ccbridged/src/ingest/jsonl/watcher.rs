@@ -21,7 +21,7 @@ use crate::state::AggregatorTx;
 /// - [`crate::state::AggregatorMsg::AddEntry`] with the entry text (if any)
 ///
 /// Token counts are persisted to `state_path` (debounced, every
-/// [`PERSIST_DEBOUNCE`]).  If `state_path` cannot be determined or written,
+/// `PERSIST_DEBOUNCE`).  If `state_path` cannot be determined or written,
 /// the watcher logs and continues — token tracking in memory is unaffected.
 ///
 /// On any watcher or parse error: log via `warn!`, never crash.
@@ -204,4 +204,3 @@ async fn handle_event(
         });
     }
 }
-

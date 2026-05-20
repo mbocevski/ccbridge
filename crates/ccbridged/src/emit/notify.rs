@@ -617,7 +617,10 @@ async fn handle_turn_done(
     if !body.is_empty() {
         body.push('\n');
     }
-    body.push_str(&format!("{} tokens", format_token_count(evt.tokens_cumulative)));
+    body.push_str(&format!(
+        "{} tokens",
+        format_token_count(evt.tokens_cumulative)
+    ));
 
     let mut hints = HashMap::new();
     hints.insert(
@@ -677,7 +680,7 @@ async fn handle_turn_done(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)] // 8 fields of independent state — a wrapper struct
-                                       // would just rename the same pieces.
+                                     // would just rename the same pieces.
 async fn handle_action(
     proxy: &NotificationsProxy<'_>,
     agg_tx: &AggregatorTx,
@@ -910,7 +913,7 @@ const MAX_DISPLAY_LEN: usize = 30;
 ///
 /// - Replaces `$HOME` prefix with `~` (e.g. `/home/u/dev/x` → `~/dev/x`).
 /// - Leaves short absolute paths intact (e.g. `/tmp/new` → `/tmp/new`).
-/// - Truncates only when the result would be ≥ [`MAX_DISPLAY_LEN`] chars,
+/// - Truncates only when the result would be ≥ `MAX_DISPLAY_LEN` chars,
 ///   replacing the middle with `…`.
 /// - Empty string → empty string.
 ///

@@ -99,7 +99,10 @@ fn undo_cli_empty_audit_log_returns_error() {
     let tmp = tempfile::tempdir().unwrap();
     // Don't write any log.
     let out = run_undo(tmp.path());
-    assert!(!out.status.success(), "must exit non-zero on empty audit log");
+    assert!(
+        !out.status.success(),
+        "must exit non-zero on empty audit log"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("no allowlist additions") || stderr.contains("audit"),

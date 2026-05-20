@@ -227,7 +227,7 @@ pub struct PermissionCmd {
 /// The two permission decisions a BLE device (or control-socket client) can send.
 ///
 /// Named `WireDecision` (not `PermissionDecision`) to avoid confusion with
-/// [`hook::PermissionDecision`], which carries the hook-stdout values
+/// [`crate::hook::PermissionDecision`], which carries the hook-stdout values
 /// `allow|deny|ask` — a different semantic domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -87,8 +87,7 @@ fn do_setup() -> Result<()> {
     }
 
     // --- 2. Write default config (only if absent) ---
-    let config_outcome = write_default_config_if_absent()
-        .context("writing default config.toml")?;
+    let config_outcome = write_default_config_if_absent().context("writing default config.toml")?;
 
     // --- 3. Enable systemd service ---
     let service_ok = run_enable_service();
@@ -117,10 +116,16 @@ fn do_setup() -> Result<()> {
     }
     match &config_outcome {
         ConfigAction::Created { path } => {
-            println!("ccbridged setup: wrote default config to {}", path.display());
+            println!(
+                "ccbridged setup: wrote default config to {}",
+                path.display()
+            );
         }
         ConfigAction::AlreadyPresent { path } => {
-            println!("ccbridged setup: config already present at {}", path.display());
+            println!(
+                "ccbridged setup: config already present at {}",
+                path.display()
+            );
         }
         ConfigAction::Skipped { reason } => {
             println!("ccbridged setup: config not written ({reason})");
@@ -888,7 +893,11 @@ mod tests {
             "PreToolUse must be Added when its value is null"
         );
         let arr = s["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(arr.len(), 1, "PreToolUse must have exactly one group after merge");
+        assert_eq!(
+            arr.len(),
+            1,
+            "PreToolUse must have exactly one group after merge"
+        );
         assert_eq!(arr[0]["hooks"][0]["command"], HOOK_COMMAND);
     }
 
@@ -954,7 +963,6 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
 
-        crate::config::Config::load_from(&path)
-            .expect("bundled default config must parse cleanly");
+        crate::config::Config::load_from(&path).expect("bundled default config must parse cleanly");
     }
 }
