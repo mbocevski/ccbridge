@@ -30,7 +30,9 @@ use ccbridged::ingest::{
     hooks as hook_ingest,
     jsonl::{spawn_watcher, PersistedTokens},
 };
-use ccbridged::state::{spawn as spawn_aggregator, DEFAULT_APPROVAL_TIMEOUT};
+use ccbridged::state::{
+    spawn as spawn_aggregator, AggregatorMsg, AggregatorTx, DEFAULT_APPROVAL_TIMEOUT,
+};
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -43,6 +45,9 @@ struct FullSetup {
     pub runtime_dir: PathBuf,
     /// Fake `~/.claude/projects/` directory for JSONL files.
     pub projects_dir: PathBuf,
+    /// Direct handle to the aggregator — for tests that inject messages without
+    /// going through the hook or ctrl sockets.
+    pub agg_tx: AggregatorTx,
 }
 
 /// Spin up aggregator + ctrl socket + hook ingest socket + JSONL watcher,
@@ -89,6 +94,7 @@ async fn setup_full(approval_timeout: Duration) -> FullSetup {
         _dir: dir,
         runtime_dir,
         projects_dir,
+        agg_tx,
     }
 }
 
@@ -458,3 +464,171 @@ async fn jsonl_tokens_reflected_in_heartbeat() {
         hb.tokens,
     );
 }
+
+// ---------------------------------------------------------------------------
+// K1: AllowlistAlways end-to-end
+// ---------------------------------------------------------------------------
+
+/// Full Always path:
+/// 1. Send PreToolUse via hook socket.
+/// 2. Wait for heartbeat with waiting=1.
+/// 3. Send AllowlistAlways directly via agg_tx.
+/// 4. Assert hook exits with Once (allow) decision.
+/// 5. Assert settings.local.json was created with the derived pattern.
+///
+/// Uses `cwd` = a fresh TempDir (no .claude/) so the "cwd becomes root" path
+/// is exercised — write_allow_pattern creates <cwd>/.claude/ on first write.
+#[tokio::test]
+async fn allowlist_always_writes_pattern_and_approves() {
+    let setup = setup_full(DEFAULT_APPROVAL_TIMEOUT).await;
+
+    // TempDir acts as the project cwd — no .claude/ dir so cwd becomes root.
+    let project_dir = tempfile::tempdir().expect("project tempdir");
+    let cwd = project_dir.path().to_str().unwrap().to_owned();
+    let tool_use_id = "toolu_always_full_001";
+
+    // ── Subscribe ctrl for heartbeats ────────────────────────────────────────
+    let (mut ctrl_r, mut ctrl_w) = ctrl_connect(&setup.runtime_dir).await;
+    drain_handshake(&mut ctrl_r).await;
+    write_json(
+        &mut ctrl_w,
+        &json!({"cmd": "subscribe", "topics": ["heartbeat"]}),
+    )
+    .await;
+    let _: Ack = read_json(&mut ctrl_r).await;
+
+    // ── Send PreToolUse via hook binary ───────────────────────────────────────
+    let event = serde_json::to_string(&json!({
+        "session_id": "sess_always_full",
+        "transcript_path": "/tmp/sess_always_full.jsonl",
+        "cwd": cwd,
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo always_full"},
+        "tool_use_id": tool_use_id
+    }))
+    .unwrap();
+
+    let mut child = Command::new(hook_bin())
+        .env("XDG_RUNTIME_DIR", &setup.runtime_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn ccbridge-hook");
+
+    let stdin = child.stdin.take().unwrap();
+    std::thread::spawn(move || {
+        let mut w = stdin;
+        w.write_all(event.as_bytes()).unwrap();
+        w.write_all(b"\n").unwrap();
+    });
+
+    // ── Wait for waiting=1 ───────────────────────────────────────────────────
+    wait_for_heartbeat(&mut ctrl_r, |hb| {
+        hb.waiting == 1 && hb.prompt.as_ref().is_some_and(|p| p.id == tool_use_id)
+    })
+    .await;
+
+    // ── Trigger AllowlistAlways via agg_tx ────────────────────────────────────
+    setup
+        .agg_tx
+        .send(AggregatorMsg::AllowlistAlways {
+            tool_use_id: tool_use_id.to_owned(),
+        })
+        .await
+        .expect("send AllowlistAlways");
+
+    // ── Assert hook exits with allow ──────────────────────────────────────────
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert!(output.status.success(), "hook must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"permissionDecision\":\"allow\""),
+        "AllowlistAlways must approve the in-flight call, got: {stdout}"
+    );
+
+    // ── Assert settings.local.json created with derived pattern ───────────────
+    // Give the write a tick to complete (it happens synchronously in the agg task).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let local = project_dir
+        .path()
+        .join(".claude")
+        .join("settings.local.json");
+    assert!(
+        local.exists(),
+        "AllowlistAlways must create settings.local.json"
+    );
+    let content = std::fs::read_to_string(&local).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let allow = v["permissions"]["allow"].as_array().unwrap();
+    assert!(
+        allow
+            .iter()
+            .any(|e| e.as_str() == Some("Bash(echo always_full)")),
+        "settings.local.json must contain the derived pattern, got: {content}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// K2a: expired id ctrl decision doesn't hang
+// ---------------------------------------------------------------------------
+
+/// Sending a permission decision for an unknown tool_use_id must be acked
+/// quickly (no hang) and the daemon must not panic.
+#[tokio::test]
+async fn expired_id_ctrl_decision_returns_ack() {
+    let setup = setup_full(DEFAULT_APPROVAL_TIMEOUT).await;
+
+    let (mut ctrl_r, mut ctrl_w) = ctrl_connect(&setup.runtime_dir).await;
+    drain_handshake(&mut ctrl_r).await;
+
+    // No pending approval for this id.
+    write_json(
+        &mut ctrl_w,
+        &json!({"cmd": "permission", "id": "toolu_nonexistent", "decision": "once"}),
+    )
+    .await;
+
+    // Must receive an ack promptly (ctrl always acks permission commands).
+    let ack: Ack = tokio::time::timeout(Duration::from_secs(2), read_json(&mut ctrl_r))
+        .await
+        .expect("ack must arrive within 2s");
+    assert_eq!(ack.ack, "permission", "ack must name the command");
+    // ok may be false (unknown id) — just verify no hang and no panic.
+    // The daemon logs a warn but the ctrl client sees a clean ack.
+}
+
+// ---------------------------------------------------------------------------
+// K2b: simulate command returns unknown_command ack
+// ---------------------------------------------------------------------------
+
+/// `{"cmd":"simulate",...}` over ctrl must be acked with `ok:false` since
+/// `allow_simulate` is not implemented yet in the ctrl handler.
+#[tokio::test]
+async fn simulate_command_returns_unknown_ack() {
+    let setup = setup_full(DEFAULT_APPROVAL_TIMEOUT).await;
+
+    let (mut ctrl_r, mut ctrl_w) = ctrl_connect(&setup.runtime_dir).await;
+    drain_handshake(&mut ctrl_r).await;
+
+    write_json(
+        &mut ctrl_w,
+        &json!({"cmd": "simulate", "event": {"hook_event_name": "PreToolUse"}}),
+    )
+    .await;
+
+    let ack: Ack = tokio::time::timeout(Duration::from_secs(2), read_json(&mut ctrl_r))
+        .await
+        .expect("ack must arrive within 2s");
+    assert_eq!(ack.ack, "simulate");
+    assert!(!ack.ok, "simulate must not be ok (not implemented)");
+}
+
+// Note: daemon_restart_clears_active_notif_map is not tested here because
+// it requires a live org.freedesktop.Notifications DBus session which is not
+// available in CI.  The notify state machine starts fresh on every daemon
+// startup by construction (HashMap::new() in the run task).
