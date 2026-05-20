@@ -266,14 +266,64 @@ pub enum UndoOutcome {
     },
 }
 
+/// Validate that an `AuditTarget::ProjectLocal` root is safe to use for undo.
+///
+/// Checks:
+/// 1. `root` must be absolute — rejects relative paths injected via log tampering.
+/// 2. `root` must not be `/` — writing to `/.claude/` is nonsensical and dangerous.
+/// 3. The best-effort canonical `root` (skipped if directory doesn't exist yet)
+///    must not equal `user_global_dir` — blocks attacks where the root points at
+///    the user-global config directory, which would trigger a write to
+///    `~/.claude/settings.local.json` instead of the expected project-local file,
+///    silently modifying the user's global config.
+///
+/// `user_global_dir` should be `permission::settings_path().parent()`.
+///
+/// # Errors
+/// Returns `Err` with a message naming the root and the violated rule.
+pub fn validate_audit_root(root: &Path, user_global_dir: &Path) -> Result<()> {
+    if !root.is_absolute() {
+        anyhow::bail!(
+            "audit log contains a relative project root {:?} — refusing undo (log may be tampered)",
+            root
+        );
+    }
+    if root == Path::new("/") {
+        anyhow::bail!("audit log contains filesystem root '/' as project root — refusing undo");
+    }
+    // Best-effort canonicalisation: skip if the directory doesn't exist yet.
+    let canonical_root = if root.exists() {
+        root.canonicalize()
+            .with_context(|| format!("canonicalize {:?}", root))?
+    } else {
+        root.to_path_buf()
+    };
+    let canonical_ugd = if user_global_dir.exists() {
+        user_global_dir
+            .canonicalize()
+            .with_context(|| format!("canonicalize {:?}", user_global_dir))?
+    } else {
+        user_global_dir.to_path_buf()
+    };
+    if canonical_root == canonical_ugd {
+        anyhow::bail!(
+            "audit log project root {:?} collides with user-global config dir {:?} — \
+             refusing undo to prevent unintended modification of user-global settings",
+            root,
+            user_global_dir
+        );
+    }
+    Ok(())
+}
+
 /// Remove the most-recent un-undone allowlist addition and mark it as undone.
 ///
 /// The target file (project-local or user-global) is read from the audit log,
 /// so the caller doesn't need to pass a settings path.
 ///
 /// Returns [`UndoOutcome`] describing what happened; the caller is responsible
-/// for printing user-facing messages.  Returns `Err` only on I/O failure or
-/// when the audit log contains no `added` entries to undo.
+/// for printing user-facing messages.  Returns `Err` only on I/O failure, log
+/// parse error, empty log, or audit root validation failure.
 pub fn undo_last_allow(audit_log_path: &Path) -> Result<UndoOutcome> {
     let entry = find_last_undone_addition(audit_log_path)
         .context("reading audit log")?
@@ -286,7 +336,16 @@ pub fn undo_last_allow(audit_log_path: &Path) -> Result<UndoOutcome> {
 
     // Resolve path from the target stored in the audit log.
     let settings_path = match &entry.target {
-        AuditTarget::ProjectLocal { root } => root.join(".claude").join("settings.local.json"),
+        AuditTarget::ProjectLocal { root } => {
+            // Validate the root before constructing any path from it.
+            let user_global_dir = crate::permission::settings_path()
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("/"));
+            validate_audit_root(root, &user_global_dir)
+                .with_context(|| format!("invalid project root in audit log: {:?}", root))?;
+            root.join(".claude").join("settings.local.json")
+        }
         AuditTarget::UserGlobal => crate::permission::settings_path(),
     };
 
@@ -886,6 +945,73 @@ mod tests {
         assert!(
             matches!(outcome, UndoOutcome::AlreadyGone { .. }),
             "must return AlreadyGone when pattern not in file"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G3: audit root validation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_audit_root_rejects_filesystem_root() {
+        let ugd = std::path::PathBuf::from("/nonexistent-ccbridge-ugd");
+        let err = validate_audit_root(Path::new("/"), &ugd).unwrap_err();
+        assert!(
+            err.to_string().contains("filesystem root"),
+            "error must name the rule, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_audit_root_rejects_relative_path() {
+        let ugd = std::path::PathBuf::from("/nonexistent-ccbridge-ugd");
+        let err = validate_audit_root(Path::new("relative/path"), &ugd).unwrap_err();
+        assert!(
+            err.to_string().contains("relative"),
+            "error must name the rule, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_audit_root_rejects_user_global_collision() {
+        // Root equal to user-global config dir must be rejected.
+        let ugd = TempDir::new().unwrap();
+        let err = validate_audit_root(ugd.path(), ugd.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("collides"),
+            "error must name the collision, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_audit_root_accepts_normal_project_dir() {
+        let dir = TempDir::new().unwrap();
+        let ugd = TempDir::new().unwrap();
+        // Two distinct temp dirs — must pass.
+        validate_audit_root(dir.path(), ugd.path()).unwrap();
+    }
+
+    #[test]
+    fn undo_last_allow_rejects_root_slash() {
+        // A JSONL audit line with root:"/" must cause undo to return Err.
+        let dir = TempDir::new().unwrap();
+        let audit = dir.path().join("audit.log");
+
+        // Write a JSONL line with root:"/".
+        let line = serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z",
+            "op": "added",
+            "pattern": "Bash(evil)",
+            "tool_use_id": "toolu_evil",
+            "session_id": "abc123",
+            "target": {"project_local": {"root": "/"}}
+        });
+        std::fs::write(&audit, format!("{line}\n")).unwrap();
+
+        let err = undo_last_allow(&audit).unwrap_err();
+        assert!(
+            err.to_string().contains("filesystem root") || err.to_string().contains("invalid"),
+            "must reject root '/', got: {err}"
         );
     }
 
