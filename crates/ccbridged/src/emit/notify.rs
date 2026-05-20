@@ -453,7 +453,7 @@ async fn handle_action(
                 let mut hints = HashMap::new();
                 hints.insert(
                     "urgency",
-                    zbus::zvariant::Value::U8(1), // normal urgency
+                    zbus::zvariant::Value::U8(2), // critical — persistent until dismissed
                 );
                 let _ = proxy
                     .notify(
@@ -465,7 +465,7 @@ async fn handle_action(
                          The previous approval window expired when the daemon restarted.",
                         &[],
                         &hints,
-                        5000,
+                        0, // 0 = server default (persistent for critical urgency)
                     )
                     .await;
             }
