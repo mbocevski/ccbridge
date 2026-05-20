@@ -432,3 +432,36 @@ async fn unsubscribe_stops_heartbeat_delivery() {
         "after unsubscribe, no heartbeat should arrive within 300ms"
     );
 }
+
+/// Sending a >1 MiB line over ctrl drops the connection cleanly.
+/// The daemon must stay up and accept new connections afterward.
+#[tokio::test]
+async fn oversized_line_drops_connection_cleanly() {
+    let (_dir, _agg_tx, runtime_dir) = setup().await;
+    let (mut reader, mut writer) = connect(&runtime_dir).await;
+
+    // Drain hello + snapshot.
+    let _: serde_json::Value = read_json(&mut reader).await;
+    let _: serde_json::Value = read_json(&mut reader).await;
+
+    // Send a line that exceeds the 1 MiB per-line cap.
+    // Pad a simple JSON object with enough whitespace to overflow.
+    let mut huge = vec![b' '; (1 << 20) + 100];
+    huge.extend_from_slice(b"\n");
+    writer.write_all(&huge).await.expect("write oversized line");
+
+    // The server must close the connection — read_line returns 0 (EOF).
+    let mut buf = String::new();
+    let n = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut buf))
+        .await
+        .expect("timeout waiting for EOF after oversized line")
+        .expect("read_line after oversized line");
+    assert_eq!(n, 0, "server must close connection on oversized input");
+
+    // Daemon must still accept new connections.
+    let (mut r2, _w2) = connect(&runtime_dir).await;
+    let _hello: ccbridge_proto::ctrl::HelloMessage =
+        tokio::time::timeout(Duration::from_secs(2), read_json(&mut r2))
+            .await
+            .expect("timeout on second connect");
+}

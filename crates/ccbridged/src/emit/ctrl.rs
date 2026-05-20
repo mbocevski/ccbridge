@@ -182,8 +182,7 @@ async fn handle_connection(
     tz_offset_secs: i32,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
-    // Cap reads at 1 MiB per line — malformed or malicious input won't OOM the daemon.
-    let mut reader = BufReader::new(tokio::io::AsyncReadExt::take(reader, 1 << 20));
+    let mut reader = BufReader::new(reader);
 
     // --- 1. Send HelloMessage ---
     let hello = build_hello(owner, tz_offset_secs);
@@ -229,6 +228,16 @@ async fn handle_connection(
                         break;
                     }
                     Ok(_) => {
+                        // Per-line 1 MiB cap — a legitimate JSON command is
+                        // never this large; oversized input is malformed or
+                        // malicious.  Drop the connection.
+                        if line.len() > 1 << 20 {
+                            warn!(
+                                "ctrl: inbound line too large ({} bytes) — dropping connection",
+                                line.len()
+                            );
+                            break;
+                        }
                         let trimmed = line.trim_end_matches(['\n', '\r']).to_owned();
                         line.clear();
                         if let Err(e) = handle_command(
