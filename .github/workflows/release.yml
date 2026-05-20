@@ -137,10 +137,14 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      # Check out the existing gh-pages tree so we can carry both channels
+      # forward — without this, each run would orphan-publish only the
+      # channel it just built and wipe the other.
       - uses: actions/checkout@v6
         with:
           ref: gh-pages
-          fetch-depth: 0
+          path: gh-pages-current
+          fetch-depth: 1
         continue-on-error: true
 
       - uses: actions/download-artifact@v8
@@ -172,6 +176,13 @@ jobs:
         env:
           CHANNEL: ${{ steps.channel.outputs.name }}
         run: |
+          mkdir -p public/apt
+          # Carry the existing apt/ tree forward (pool, dists, db) so the
+          # other channel's packages survive this orphan publish.  reprepro
+          # re-uses its db to layer the new .deb incrementally.
+          if [ -d gh-pages-current/apt ]; then
+            cp -a gh-pages-current/apt/. public/apt/
+          fi
           mkdir -p public/apt/conf
           KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
           cat > public/apt/conf/distributions <<EOF
@@ -189,6 +200,12 @@ jobs:
           SignWith: $KEY_ID
           Description: ccbridge beta builds (auto-published from main)
           EOF
+          # Trim older versions from this channel before adding the new
+          # one — keeps the pool from accumulating old beta .debs forever.
+          # Stable keeps every released version; beta keeps only the latest.
+          if [ "$CHANNEL" = "beta" ]; then
+            reprepro -b public/apt removematched beta 'ccbridge' || true
+          fi
           for deb in dist/*.deb; do
             reprepro -b public/apt --component main includedeb "$CHANNEL" "$deb"
           done
