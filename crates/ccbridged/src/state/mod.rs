@@ -620,6 +620,20 @@ impl Aggregator {
                     .or_insert_with(|| Session::new(&e.base.session_id, &e.base.cwd))
                     .bump_activity();
 
+                // Surface sub-agent launches in the entries log so it's
+                // visible the parent dispatched a sub-agent (tokens still
+                // route through the parent session, so without this nothing
+                // would visibly distinguish a sub-agent run from any other
+                // tool call).
+                if e.tool_name == "Agent" {
+                    let agent_label = e
+                        .tool_input
+                        .get("subagent_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    self.push_entry(format!("agent start: {agent_label}"));
+                }
+
                 // Cascade project-local + project + user allowlists for this cwd.
                 let cascade = self
                     .allowlist_cache
@@ -671,11 +685,20 @@ impl Aggregator {
                     // for any preceding Stop should be invalidated.
                     s.bump_activity();
                 }
-                self.push_entry(format!(
-                    "{}: {}",
-                    e.tool_name,
-                    format_tool_hint(&e.tool_input),
-                ));
+                if e.tool_name == "Agent" {
+                    let agent_label = e
+                        .tool_input
+                        .get("subagent_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    self.push_entry(format!("agent done: {agent_label}"));
+                } else {
+                    self.push_entry(format!(
+                        "{}: {}",
+                        e.tool_name,
+                        format_tool_hint(&e.tool_input),
+                    ));
+                }
                 self.broadcast_heartbeat();
                 let _ = respond.send(HookOutcome::Immediate(HookResponse::Passthrough));
             }
