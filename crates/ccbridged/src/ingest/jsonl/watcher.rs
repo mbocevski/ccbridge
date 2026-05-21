@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use tracing::warn;
 
-use super::dates::current_utc_date_string;
+use super::dates::current_local_date_string;
 use super::offsets::FileOffsets;
 use super::parse::parse_jsonl_line;
 use super::tokens::PersistedTokens;
@@ -54,10 +54,11 @@ async fn run_watcher(
     let mut cumulative = initial_tokens.cumulative;
     let mut today = initial_tokens.today;
     // Track the date the current `today` counter belongs to.  We use the
-    // persisted date if available so we don't recompute it on every persist and
-    // don't accidentally advance the date boundary until midnight-reset fires.
-    let current_date = if initial_tokens.date.is_empty() {
-        current_utc_date_string()
+    // persisted date if available so we don't recompute it on every persist;
+    // self-heal logic on each TokensUpdate catches the suspend-across-midnight
+    // case when the in-process timer never fires.
+    let mut current_date = if initial_tokens.date.is_empty() {
+        current_local_date_string()
     } else {
         initial_tokens.date.clone()
     };
@@ -135,6 +136,8 @@ async fn run_watcher(
                             &agg_tx,
                             &mut cumulative,
                             &mut today,
+                            &mut current_date,
+                            &state_path,
                             &mut tokens_dirty,
                         )
                         .await;
@@ -161,12 +164,15 @@ async fn run_watcher(
 }
 
 /// Process one notify event.
+#[allow(clippy::too_many_arguments)]
 async fn handle_event(
     event: notify::Event,
     offsets: &mut FileOffsets,
     agg_tx: &AggregatorTx,
     cumulative: &mut u64,
     today: &mut u64,
+    current_date: &mut String,
+    state_path: &std::path::Path,
     tokens_dirty: &mut bool,
 ) {
     use notify::EventKind;
@@ -195,6 +201,40 @@ async fn handle_event(
             };
 
             if parsed.output_tokens > 0 {
+                // Self-heal: if the in-memory date is stale (timer missed
+                // midnight, e.g. laptop was suspended), zero `today` before
+                // incrementing.  Cheap string compare on the hot path.
+                let local_today = current_local_date_string();
+                if *current_date != local_today {
+                    let from = std::mem::replace(current_date, local_today.clone());
+                    let lost = *today;
+                    *today = 0;
+                    *tokens_dirty = true;
+                    tracing::info!(
+                        from = %from,
+                        to = %local_today,
+                        rolled_over = lost,
+                        "tokens: date drift detected on TokensUpdate; zeroing `today`",
+                    );
+                    let new_date = local_today.clone();
+                    let tx = agg_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx
+                            .send(crate::state::AggregatorMsg::DailyReset { date: new_date })
+                            .await;
+                    });
+                    // Persist immediately so a crash before the debounce
+                    // doesn't lose the rollover.
+                    let snap = PersistedTokens {
+                        date: current_date.clone(),
+                        cumulative: *cumulative,
+                        today: 0,
+                    };
+                    if let Err(e) = snap.save(state_path) {
+                        warn!("JSONL watcher: failed to persist rollover: {e:#}");
+                    }
+                }
+
                 *cumulative += parsed.output_tokens;
                 *today += parsed.output_tokens;
                 *tokens_dirty = true;

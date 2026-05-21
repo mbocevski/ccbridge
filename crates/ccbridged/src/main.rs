@@ -120,7 +120,7 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         tracing::warn!("cannot determine token state path: {e:#}; persistence disabled");
         std::path::PathBuf::from("/dev/null")
     });
-    let initial_tokens = jsonl_ingest::PersistedTokens::load(&tokens_path).unwrap_or_default();
+    let mut initial_tokens = jsonl_ingest::PersistedTokens::load(&tokens_path).unwrap_or_default();
     info!(
         cumulative = initial_tokens.cumulative,
         today = initial_tokens.today,
@@ -170,6 +170,11 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         audit_log,
         config.emit.notify.turn_done.idle_grace(),
     );
+
+    // Roll the persisted token state to today's local date if it's stale —
+    // covers the laptop-suspended-across-midnight case where the in-process
+    // midnight timer never fired.
+    jsonl_ingest::catch_up_token_date(&mut initial_tokens, &tokens_path, &agg_tx).await;
 
     // Spawn hook ingest socket.
     hook_ingest::spawn(runtime_dir.clone(), agg_tx.clone());

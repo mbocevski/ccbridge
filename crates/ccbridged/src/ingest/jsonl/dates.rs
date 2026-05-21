@@ -18,6 +18,26 @@ pub(crate) fn current_utc_date_string() -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+/// Return the current date as a `"YYYY-MM-DD"` string in *local* time.
+///
+/// The midnight-reset timer fires at local midnight, so the date stamp must
+/// also be local — using UTC here causes the persisted date to lag by the
+/// local offset until UTC midnight catches up, which can desync the watcher's
+/// "is the persisted date stale?" check from the timer.
+///
+/// Falls back to UTC when the local offset cannot be resolved.
+pub(crate) fn current_local_date_string() -> String {
+    use time::OffsetDateTime;
+
+    match OffsetDateTime::now_local() {
+        Ok(now) => {
+            let d = now.date();
+            format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
+        }
+        Err(_) => current_utc_date_string(),
+    }
+}
+
 /// Compute how long to sleep until the next local midnight.
 ///
 /// Uses the `time` crate for local-offset awareness.  Falls back to UTC

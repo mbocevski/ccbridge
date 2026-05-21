@@ -39,6 +39,7 @@ mod dates;
 mod midnight;
 mod offsets;
 mod parse;
+mod reset;
 mod tokens;
 mod watcher;
 
@@ -48,6 +49,25 @@ pub use offsets::FileOffsets;
 pub use parse::{ParsedAssistantLine, parse_jsonl_line};
 pub use tokens::{PersistedTokens, tokens_state_path};
 pub use watcher::spawn_watcher;
+
+/// Roll the persisted token state to today's local date if it's stale.
+///
+/// Called from `main.rs` at startup, before the watcher seeds the
+/// aggregator, so that a daemon launched after a multi-day suspend
+/// reports `today=0` for today rather than carrying forward a stale
+/// `today` from the date it was last shut down on.
+///
+/// `state` is mutated in place.  When a rollover fires, `today` is
+/// zeroed, `date` is advanced, the file at `state_path` is rewritten,
+/// and a `DailyReset` is sent to the aggregator.  `cumulative` is
+/// preserved.
+pub async fn catch_up_token_date(
+    state: &mut PersistedTokens,
+    state_path: &std::path::Path,
+    agg_tx: &crate::state::AggregatorTx,
+) {
+    let _ = reset::catch_up_to_local_date(state, state_path, agg_tx).await;
+}
 
 // Crate-internal re-export for `permission/additions/audit_log.rs` which
 // builds an ISO-8601 timestamp via `days_to_ymd`.
@@ -287,13 +307,22 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn midnight_reset_preserves_cumulative_from_aggregator() {
-        // Spin up a real aggregator and seed it with non-zero output tokens
-        // (simulating a normal day's accumulation). Then run one iteration
-        // of perform_midnight_reset and assert the persisted file carries
-        // the actual cumulative — not 0.
+    async fn midnight_reset_zeroes_today_and_preserves_cumulative() {
+        // Simulate the canonical case: a previous day's persisted state
+        // (date = some past day, today > 0, cumulative > 0) sits on disk;
+        // the timer fires; the rollover should zero today, advance the
+        // date, and preserve cumulative.
         let dir = TempDir::new().unwrap();
         let state_path = dir.path().join("tokens.json");
+
+        // Seed yesterday's state on disk.
+        PersistedTokens {
+            date: "2020-01-01".to_owned(), // intentionally far in the past
+            today: 184_502,
+            cumulative: 184_502,
+        }
+        .save(&state_path)
+        .unwrap();
 
         let (agg_tx, _hb_rx) = crate::state::spawn(
             crate::state::DEFAULT_APPROVAL_TIMEOUT,
@@ -303,40 +332,21 @@ mod tests {
             ))),
         );
 
-        // Drive the aggregator's cumulative up to 184_502 via TokensUpdate.
-        agg_tx
-            .send(crate::state::AggregatorMsg::TokensUpdate {
-                output_tokens: 184_502,
-                session_id: None,
-            })
-            .await
-            .unwrap();
-
-        // Round-trip a heartbeat to confirm the aggregator has processed
-        // the update before we run the reset (otherwise we race the read).
-        let (htx, hrx) = tokio::sync::oneshot::channel();
-        agg_tx
-            .send(crate::state::AggregatorMsg::GetHeartbeat { respond: htx })
-            .await
-            .unwrap();
-        let hb = hrx.await.unwrap();
-        assert_eq!(
-            hb.tokens, 184_502,
-            "precondition: aggregator must hold 184_502"
-        );
-
         // Run one reset iteration.
         let cf = perform_midnight_reset(&state_path, &agg_tx).await;
         assert!(matches!(cf, std::ops::ControlFlow::Continue(())));
 
-        // The persisted file must carry the queried cumulative, not 0.
+        // The persisted file must carry the rolled-over state.
         let loaded = PersistedTokens::load(&state_path).unwrap();
         assert_eq!(loaded.today, 0, "today must reset to 0");
         assert_eq!(
             loaded.cumulative, 184_502,
-            "cumulative must be queried from the aggregator, not zeroed"
+            "cumulative must be preserved across the rollover"
         );
-        assert!(!loaded.date.is_empty(), "date must be set to today");
+        assert_ne!(
+            loaded.date, "2020-01-01",
+            "date must advance past the seeded value"
+        );
     }
 
     // -----------------------------------------------------------------------
