@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [features]
 default = ["ble"]
-ble = []
+ble = ["dep:bluer", "dep:uuid", "dep:futures-util"]
 
 [dependencies]
 ccbridge-proto = { workspace = true }
@@ -40,6 +40,9 @@ lru = "0.18"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
+bluer = { version = "0.17", default-features = false, features = ["bluetoothd"], optional = true }
+uuid = { version = "1", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

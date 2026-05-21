@@ -190,6 +190,55 @@ Only `127.0.0.1` (IPv4) and `::1` (IPv6) are accepted; a non-loopback `addr`
 in the config produces a warning and disables the endpoint without crashing the
 daemon.
 
+## BLE bridge
+
+ccbridge can mirror the heartbeat — and accept Approve/Deny decisions back —
+over Bluetooth Low Energy. ccbridge plays the **central** role; any peripheral
+that advertises the Nordic UART Service (NUS) and speaks ccbridge's JSON-on-NUS
+dialect is supported. The reference firmware lives at
+[ccbridge-buddy](https://github.com/mbocevski/ccbridge-buddy) (ESP32-S3).
+
+**Pairing happens via the OS.** ccbridge consumes already-paired devices from
+BlueZ; it never initiates pairing itself. Pair once with whatever tool you
+prefer:
+
+```sh
+# Power on, scan, pair, trust — once per device.
+bluetoothctl power on
+bluetoothctl scan on        # find your device's MAC
+bluetoothctl pair AA:BB:CC:DD:EE:FF
+bluetoothctl trust AA:BB:CC:DD:EE:FF
+bluetoothctl scan off
+```
+
+(Or use any GUI Bluetooth tool — blueman, GNOME Bluetooth, KDE Bluetooth.)
+
+Then enable the bridge in `~/.config/ccbridge/config.toml`:
+
+```toml
+[emit.ble]
+enabled = true
+```
+
+Restart the daemon. Every paired device that advertises the NUS service UUID
+gets its own session — multiple devices work in parallel. The device receives
+an `OwnerMessage` + `TimeSync` on connect, then a stream of `Heartbeat`
+snapshots; pressing Approve / Deny on the device sends a `PermissionCmd` back
+which the daemon routes into the same approval pipeline as desktop notifications.
+
+To nickname or disable a specific paired device without un-pairing it:
+
+```toml
+[[emit.ble.device]]
+address  = "AA:BB:CC:DD:EE:FF"
+nickname = "desk buddy"
+disabled = false
+```
+
+To stop using a device entirely, un-pair it via the OS
+(`bluetoothctl remove AA:BB:CC:DD:EE:FF`) — ccbridge picks up the removal and
+shuts down the session within a few seconds.
+
 ## Configuration
 
 ccbridge reads `$XDG_CONFIG_HOME/ccbridge/config.toml`.  See
@@ -205,6 +254,8 @@ reference.
 | `emit.notify.turn_done.idle_grace_ms` | `10000` | How long a session must be idle after Stop before the notification fires |
 | `emit.http.enabled` | `false` | Enable HTTP `/status` endpoint (Waybar) |
 | `emit.http.addr` | `"127.0.0.1:9876"` | Address for the HTTP endpoint |
+| `emit.ble.enabled` | `false` | Mirror heartbeat to paired BLE peripherals (NUS) |
+| `emit.ble.service_uuid` | NUS UUID | Service UUID a paired device must advertise |
 
 To apply a config change: edit the file and restart the daemon
 (`systemctl --user restart ccbridge`). There is no hot-reload for

@@ -14,7 +14,7 @@
 [approvals]
 
 # How long to wait for a decision from any emit module (notify, ctrl socket,
-# BLE) before falling back to the behaviour specified by `fallback`.
+# BLE, etc.) before falling back to the behaviour specified by `fallback`.
 timeout_ms = 30000
 
 # What to do when the timeout elapses with no decision:
@@ -74,6 +74,34 @@ allow_simulate = false
 [emit.http]
 enabled = false
 addr    = "127.0.0.1:9876"
+
+# ---------------------------------------------------------------------------
+# [emit.ble] — Bluetooth Low Energy NUS bridge (disabled by default)
+#
+# ccbridge plays the BLE *central* role: it watches BlueZ for paired devices
+# that advertise the Nordic UART Service and runs one session per device.
+# Pairing itself happens via the OS (`bluetoothctl pair AA:BB:CC:DD:EE:FF`,
+# blueman-applet, GNOME / KDE Bluetooth panel, etc.) — the daemon never
+# initiates pairing on its own.  This keeps key storage in BlueZ where it
+# belongs.
+# ---------------------------------------------------------------------------
+
+[emit.ble]
+enabled = false
+
+# Service UUID a paired device must advertise to be considered ours.
+# Any peripheral speaking the standard NUS+JSON dialect ccbridge expects.
+service_uuid = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+
+# Per-device overrides — one [[emit.ble.device]] block per paired device.
+# `nickname` is shown in logs; `disabled = true` makes ccbridge ignore the
+# device without un-pairing it from the OS.  Address matching is case-
+# insensitive.
+#
+# [[emit.ble.device]]
+# address  = "AA:BB:CC:DD:EE:FF"
+# nickname = "desk buddy"
+# disabled = false
 
 # ---------------------------------------------------------------------------
 # [tokens] — token-usage persistence

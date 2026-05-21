@@ -228,8 +228,27 @@ async fn daemon_main(tz_offset: i32) -> Result<()> {
         );
     }
     if config.emit.ctrl.enabled {
-        ctrl_emit::spawn(runtime_dir, agg_tx.clone(), hb_rx, owner, tz_offset);
+        ctrl_emit::spawn(
+            runtime_dir,
+            agg_tx.clone(),
+            hb_rx.resubscribe(),
+            owner.clone(),
+            tz_offset,
+        );
     }
+    #[cfg(feature = "ble")]
+    if config.emit.ble.enabled {
+        ccbridged::emit::ble::spawn(
+            config.emit.ble.clone(),
+            agg_tx.clone(),
+            hb_rx.resubscribe(),
+            owner.clone(),
+            tz_offset,
+        );
+    }
+    // Drop the original receiver after fanout so the broadcast channel
+    // doesn't keep an unread slot alive.
+    drop(hb_rx);
     if config.emit.http.enabled {
         match config.emit.http.addr.parse::<std::net::SocketAddr>() {
             Ok(addr) => match http_emit::spawn(agg_tx.clone(), addr).await {

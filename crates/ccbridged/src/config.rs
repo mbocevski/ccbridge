@@ -131,6 +131,9 @@ pub struct Emit {
 
     #[serde(default)]
     pub http: HttpConfig,
+
+    #[serde(default)]
+    pub ble: BleConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +279,65 @@ impl Default for HttpConfig {
 
 fn default_http_addr() -> String {
     "127.0.0.1:9876".to_owned()
+}
+
+// ---------------------------------------------------------------------------
+// [emit.ble]
+// ---------------------------------------------------------------------------
+
+/// `[emit.ble]` — Bluetooth Low Energy NUS-bridge emitter.
+///
+/// ccbridge plays the *central* role: it watches BlueZ for paired devices
+/// that advertise the Nordic UART Service (NUS) and treats every match as a
+/// peripheral.  Pairing is the OS's responsibility (`bluetoothctl pair`); the
+/// daemon never initiates pairing on its own.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BleConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Service UUID a paired device must advertise to be considered ours.
+    /// Defaults to the standard Nordic UART Service UUID.
+    #[serde(default = "default_nus_service_uuid")]
+    pub service_uuid: String,
+
+    /// Per-device overrides keyed by Bluetooth address (`AA:BB:CC:DD:EE:FF`).
+    /// Lets you nickname or disable specific paired devices without touching
+    /// BlueZ.
+    #[serde(default)]
+    pub device: Vec<BleDeviceOverride>,
+}
+
+impl Default for BleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service_uuid: default_nus_service_uuid(),
+            device: Vec::new(),
+        }
+    }
+}
+
+/// `[[emit.ble.device]]` — per-device configuration overlay.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BleDeviceOverride {
+    /// Bluetooth address, e.g. `AA:BB:CC:DD:EE:FF`.  Case-insensitive.
+    pub address: String,
+
+    /// Friendly name shown in logs.  When absent, the BlueZ-reported name is
+    /// used.
+    #[serde(default)]
+    pub nickname: Option<String>,
+
+    /// `true` makes the daemon ignore this paired device entirely.
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+fn default_nus_service_uuid() -> String {
+    "6e400001-b5a3-f393-e0a9-e50e24dcca9e".to_owned()
 }
 
 // ---------------------------------------------------------------------------
