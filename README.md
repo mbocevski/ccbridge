@@ -133,6 +133,30 @@ If the daemon is not running or crashes, Claude Code behaves exactly as if
 ccbridge were not installed. The hook binary exits 0 with no output on any
 error — daemon-down is never a Claude Code outage.
 
+## Tokens
+
+ccbridge tracks output tokens by tailing `~/.claude/projects/**/*.jsonl`
+(including `*/subagents/*.jsonl` so sub-agent activity is counted under
+the parent session). Two counters are exposed in the heartbeat:
+
+- `tokens` — cumulative output tokens since the daemon first ran.
+- `tokens_today` — output tokens since local midnight, persisted across
+  restarts in `$XDG_STATE_HOME/ccbridge/tokens.json`.
+
+**Only tokens observed while ccbridge is running are counted.** If the
+daemon is stopped during a Claude Code session, the lines written in
+that window are skipped — there is no retroactive backfill. Both counters
+self-heal when the daemon resumes after a missed local midnight: the
+date stamp is advanced, `today` is zeroed, and `cumulative` is preserved.
+This covers the common case of a laptop suspended across midnight.
+
+When the parent session dispatches a sub-agent (via Claude Code's `Agent`
+tool), an `agent start: <subagent_type>` entry appears in the heartbeat's
+activity log, paired with `agent done: <subagent_type>` when it returns.
+The sub-agent's tool calls don't surface as separate approval prompts —
+they run with whatever permission mode the parent passed down — but the
+token count keeps incrementing live.
+
 ## Control socket
 
 The control socket at `$XDG_RUNTIME_DIR/ccbridge/ctrl.sock` is a
