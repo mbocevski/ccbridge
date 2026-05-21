@@ -44,6 +44,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: stable-build
+      # bluer (BLE feature) → libdbus-sys → needs libdbus dev headers.
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo clippy --workspace --all-targets --all-features
 
   test:
@@ -55,6 +57,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: stable-build
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --workspace --all-features --tests --locked
       - run: cargo test --workspace --all-features
 
@@ -69,4 +72,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: stable-build
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo doc --workspace --no-deps --all-features

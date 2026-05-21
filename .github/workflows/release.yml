@@ -76,6 +76,12 @@ jobs:
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked --version "^2.0"
 
+      # bluer (BLE feature, default-on) → libdbus-sys → needs libdbus dev
+      # headers at compile time.  At runtime the .deb's $auto Depends
+      # picks up the shared library and Suggests covers the daemon.
+      - name: Install BLE build deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Build release binaries
         run: |
           cargo build --release --workspace --target ${{ matrix.target }}
