@@ -106,3 +106,18 @@ workflow with `workflow_dispatch` to repopulate.
 **arm64 user gets the amd64 package** — they didn't include
 `[arch=arm64]` in their sources.list line.  The README snippet uses
 `$(dpkg --print-architecture)` which auto-detects.
+
+## Runtime dependencies
+
+`Depends:` is `$auto` (cargo-deb resolves it from the binary's actual
+shared-library imports — libc, libgcc).  Other software ccbridge can use
+is listed under `Suggests:` so apt does not auto-install any of it:
+
+| Package | Used by | Notes |
+|---|---|---|
+| `dunst` / `mako-notifier` / `swaync` / `notification-daemon` | `[emit.notify]` | At least one is needed to see approval prompts.  Most desktops already have one. |
+| `bluez` | `[emit.ble]` | Provides `bluetoothd`.  Required when the BLE bridge is enabled; users who don't pair a peripheral don't need it. |
+
+Users running headless / on a desktop without a notification daemon can
+ignore those Suggests entirely — ccbridge degrades gracefully (the ctrl
+socket and HTTP `/status` keep working).
