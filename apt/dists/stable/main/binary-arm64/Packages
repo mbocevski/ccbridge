@@ -1,0 +1,19 @@
+Package: ccbridge
+Version: 0.1.3
+Architecture: arm64
+Maintainer: Marko Bocevski <marko.bocevski@gmail.com>
+Installed-Size: 12090
+Depends: libc6 (>= 2.34), libc6 (>= 2.39), libdbus-1-3 (>= 1.9.14)
+Suggests: dunst | mako-notifier | swaync | notification-daemon, bluez
+Priority: optional
+Section: utils
+Filename: pool/main/c/ccbridge/ccbridge_0.1.3_arm64.deb
+Size: 2611608
+SHA256: 609a9662b428760ebc29047ed9214ad3e128b3f8a20094860987d3615ad673ba
+SHA1: 488869ac45dc791fa22b65c8441bd1969ffb8f58
+MD5sum: 8557c8cffa1e4917e3a459a38b763e2f
+Description: Claude Code aggregator bridge daemon
+ ccbridge aggregates state across all running Claude Code sessions on this
+ machine and surfaces approval prompts through your freedesktop notification
+ daemon and a bidirectional control socket.
+

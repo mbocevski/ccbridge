@@ -1,0 +1,27 @@
+Suite: beta
+Codename: beta
+Date: Sat, 23 May 2026 10:14:49 UTC
+Architectures: amd64 arm64
+Components: main
+Description: ccbridge beta builds (auto-published from main)
+MD5Sum:
+ e06b457d23aba619766e262e9ef8f23f 822 main/binary-amd64/Packages
+ 2303870a0cc9a5d2dc9aa9c03491bfdf 545 main/binary-amd64/Packages.gz
+ 840deb41c342c9e1f923094f23339a47 111 main/binary-amd64/Release
+ 8d5d702718e7e104a941ba34784166a0 822 main/binary-arm64/Packages
+ b8707a9a0a048fbc8fdffcf51d041df4 545 main/binary-arm64/Packages.gz
+ f331863d1c03c7995dfc18cc07ee7574 111 main/binary-arm64/Release
+SHA1:
+ 13f17d4ac8a67b25f4f645bc3829497356c516a1 822 main/binary-amd64/Packages
+ 25b57cfcdd8db6ad380623cccfdcf8369aa9d584 545 main/binary-amd64/Packages.gz
+ 08a3cd5ff2bb5e2f58d43e09a0728b03d030940b 111 main/binary-amd64/Release
+ 73d51ffb2f6ae85765813f3fe7b9fae9358a8301 822 main/binary-arm64/Packages
+ 8a233ca5b135c518189bee9bece64b281b04a825 545 main/binary-arm64/Packages.gz
+ 70c1c7eaaacb9589209d0e14df72861345e55485 111 main/binary-arm64/Release
+SHA256:
+ 0da25b8cac6a0dcbe2ceebf85cebab9250912420afb588679d3bdeb80c78bd20 822 main/binary-amd64/Packages
+ 1b8d8d28372159eea1ed6049ae2ac43c95524c6208fdd66aba291ffcc4d2f0b0 545 main/binary-amd64/Packages.gz
+ 1f55cfbd490ef1f7f53d914751f664048039969358b4db1e7af09bd3156cf783 111 main/binary-amd64/Release
+ 63a02f2fe7f382bbed4ec1dc062ec996df2274ffeb5fc67edfd91bb9aa7631bb 822 main/binary-arm64/Packages
+ 11089e4d17c3633a21e5e69352661f4c4845fe3413efd0d222562581281c17bf 545 main/binary-arm64/Packages.gz
+ a4ab043f5c4266a796ce180dcf8909aaa7bdbc7357e5d3b77be6a443ac248070 111 main/binary-arm64/Release

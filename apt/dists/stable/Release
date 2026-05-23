@@ -1,0 +1,27 @@
+Suite: stable
+Codename: stable
+Date: Thu, 21 May 2026 14:52:57 UTC
+Architectures: amd64 arm64
+Components: main
+Description: ccbridge stable releases
+MD5Sum:
+ b6eb1ad8a341ed362f8b9bbea58fc7af 778 main/binary-amd64/Packages
+ 5e98815cb6c9be48c2c48d41767c7c0e 524 main/binary-amd64/Packages.gz
+ 5cfc4e2ac9f17300f2bb4fa5114e0c90 90 main/binary-amd64/Release
+ ac98394e20987974d3ed111ac0a28c02 778 main/binary-arm64/Packages
+ b51157c9f227350071fcb9ccde10a132 528 main/binary-arm64/Packages.gz
+ d771ae40317ff8273414b161ee274744 90 main/binary-arm64/Release
+SHA1:
+ 0d9830097c1accf7aeb1f5be32079d9efcb674e4 778 main/binary-amd64/Packages
+ 02bf1e071eecf434e9cff20f31ab918833c0fdb6 524 main/binary-amd64/Packages.gz
+ 7b95fe0a3942168bce74d01ff5b282724833ceb6 90 main/binary-amd64/Release
+ 34d2d1bbda4441654c5d38a7ab0c2757cc125daa 778 main/binary-arm64/Packages
+ af762d0b40826402beb6796f8b7b89f2ef04f37a 528 main/binary-arm64/Packages.gz
+ 2ccef55d7e6dd4497b47922fa6c7ccd9f2634cdb 90 main/binary-arm64/Release
+SHA256:
+ a36b77b98e0cac910576d9dcdc9f4098d3d3e656ccf27d102f878a0416ce77fe 778 main/binary-amd64/Packages
+ daca99767b31a83c345b9263e1c25b05a1f5608eefa4afa48d60ba2ef9bf5aad 524 main/binary-amd64/Packages.gz
+ c9734c4878dcfbf095dd7aef39f2320fd399d3c179c6bd18b729d2b015119dea 90 main/binary-amd64/Release
+ 21373fbf38cc27518b66e30d5353baf40d56d2c39b891fe284107cf0fe045144 778 main/binary-arm64/Packages
+ e0c481af53912affb1367d388428a2cb282da44a2a02c51bab21bcb9abd2e2dd 528 main/binary-arm64/Packages.gz
+ 8473d40aa9620157462f5ae490b9e09819a0fd0bd5b5ddaa27681c95e49acb03 90 main/binary-arm64/Release
