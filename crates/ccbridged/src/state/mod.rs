@@ -26,7 +26,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ccbridge_proto::buddy::{Heartbeat, MatchSource, PromptInfo, WireDecision};
+use ccbridge_proto::buddy::{Heartbeat, MatchSource, PromptInfo, SessionInfo, WireDecision};
 use ccbridge_proto::hook::HookEvent;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{MissedTickBehavior, interval};
@@ -556,6 +556,26 @@ impl Aggregator {
             );
         }
 
+        // One `SessionInfo` per open session, regardless of prompt state.
+        // Distinct from `prompts` (which is filtered to waiting sessions);
+        // consumers needing visibility into background-running sessions
+        // (e.g. the buddy firmware's fleet identity) read this list.
+        let sessions: Vec<SessionInfo> = self
+            .sessions
+            .values()
+            .map(|s| SessionInfo {
+                id: s.id.clone(),
+                cwd: Some(s.cwd.clone()),
+                agent_type: s
+                    .pending_tool_use_id
+                    .as_ref()
+                    .and_then(|id| self.pending.get(id))
+                    .and_then(|(_, ap)| ap.event.agent_type.clone()),
+                running: s.running,
+                waiting: s.waiting,
+            })
+            .collect();
+
         Heartbeat {
             total,
             running,
@@ -565,6 +585,7 @@ impl Aggregator {
             tokens: self.tokens.cumulative,
             tokens_today: self.tokens.today,
             prompts,
+            sessions,
         }
     }
 

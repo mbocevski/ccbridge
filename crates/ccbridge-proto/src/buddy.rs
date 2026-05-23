@@ -48,14 +48,23 @@ use serde_json::Value;
 ///      "session_id": "sess-A"},
 ///     {"id": "req_def", "tool": "Edit", "hint": "/etc/hosts",
 ///      "session_id": "sess-B"}
+///   ],
+///   "sessions": [
+///     {"id": "sess-A", "cwd": "/home/me/dev/foo", "running": false, "waiting": true},
+///     {"id": "sess-B", "cwd": "/home/me/dev/bar", "running": false, "waiting": true},
+///     {"id": "sess-C", "cwd": "/home/me/dev/baz", "running": true,  "waiting": false}
 ///   ]
 /// }
 /// ```
 ///
-/// `prompts` is a list (one element per session currently waiting on an
-/// approval) so emitters can surface each parallel session as its own
-/// notification.  Insertion order matches the aggregator's session HashMap
-/// — order is not guaranteed and clients should key by `prompt.session_id`.
+/// `prompts` lists only sessions currently blocked on a permission
+/// decision (so emitters can surface one notification per pending
+/// approval).  `sessions` is the unfiltered list — every open session,
+/// regardless of prompt state — for clients that need to see all
+/// activity (e.g. the buddy firmware's fleet-identity layer).
+/// Insertion order matches the aggregator's session HashMap; clients
+/// should key by `prompt.session_id` / `session.id` rather than
+/// position.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Heartbeat {
     /// Total number of open sessions.
@@ -83,6 +92,15 @@ pub struct Heartbeat {
     /// Empty when no session is awaiting a decision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompts: Vec<PromptInfo>,
+
+    /// Summary of every open Claude Code session, regardless of prompt
+    /// state.  Use this when you need to track *all* sessions (e.g.
+    /// the buddy firmware's fleet-identity layer); for approval popups,
+    /// use [`Self::prompts`] instead.  Insertion order matches the
+    /// aggregator's session HashMap and is not guaranteed; key by
+    /// [`SessionInfo::id`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<SessionInfo>,
 }
 
 /// Pending permission prompt embedded in [`Heartbeat`].
@@ -127,6 +145,42 @@ pub struct PromptInfo {
     /// `None` when the prompt came from a top-level session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+}
+
+/// Per-session summary embedded in [`Heartbeat::sessions`].
+///
+/// `prompts[]` only carries sessions blocked on a permission decision; that
+/// excludes sessions doing background work without a pending approval.
+/// `sessions[]` is the unfiltered list — one entry per open Claude Code
+/// session — so consumers (e.g. the buddy firmware's fleet identity layer)
+/// can track every active session, not just ones currently demanding a
+/// decision.  The desktop notification path keeps reading `prompts[]`
+/// unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Full session UUID from the hook event.  Stable for the lifetime
+    /// of the Claude Code session; consumers can hash/key by this.
+    #[serde(default)]
+    pub id: String,
+
+    /// Working directory of the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+
+    /// `agent_type` (e.g. `"general-purpose"`, `"task-planner"`) when the
+    /// session is a sub-agent.  `None` for top-level sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+
+    /// `true` when the session is actively generating output.
+    #[serde(default)]
+    pub running: bool,
+
+    /// `true` when the session is blocked on a permission prompt.
+    /// The corresponding entry will also appear in
+    /// [`Heartbeat::prompts`] with the same `session_id`.
+    #[serde(default)]
+    pub waiting: bool,
 }
 
 /// Which side of the user's allowlist a pattern came from.
